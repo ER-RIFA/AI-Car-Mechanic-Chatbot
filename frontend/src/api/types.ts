@@ -41,6 +41,28 @@ export interface DiagnosisResponse {
   message: string | null
 }
 
+export interface BookingRequest {
+  diagnosis_id: number
+  conversation_id: string
+  customer_name: string
+  phone: string
+  email: string
+  vehicle_make: string
+  vehicle_model: string
+  vehicle_year: number | null
+  preferred_date: string
+  preferred_time: string
+  service_address: string
+}
+
+export type BookingStatus = 'pending' | 'confirmed' | 'cancelled'
+
+export interface BookingResponse extends BookingRequest {
+  id: number
+  status: BookingStatus
+  created_at: string
+}
+
 export interface ChatErrorBody {
   error?: {
     code?: string

@@ -11,7 +11,7 @@ from django.test.utils import override_settings
 from django.utils.functional import empty
 from rest_framework.test import APIClient
 
-from .models import Conversation, Diagnosis, MediaAttachment, Message
+from .models import Booking, Conversation, Diagnosis, MediaAttachment, Message
 from .services.chat_service import ChatService
 from .services.gemini_service import GeminiDiagnosticResult, GeminiService, GeminiServiceError
 
@@ -443,3 +443,83 @@ class DiagnosisAPITests(TestCase):
 		self.assertEqual(response.data['diagnosis_id'], diagnosis.id)
 		self.assertEqual(response.data['source'], Diagnosis.Source.GEMINI)
 		self.assertEqual(response.data['diagnosis'], 'Transmission or clutch problem')
+
+
+class BookingAPITests(TestCase):
+	def setUp(self):
+		self.client = APIClient()
+		self.conversation = Conversation.objects.create(session_id=str(uuid.uuid4()))
+		self.diagnosis = Diagnosis.objects.create(
+			conversation=self.conversation,
+			symptoms=['starting problem'],
+			result=json.dumps({'diagnosis': 'Weak or discharged battery'}),
+			recommended_service='Battery and starting-system inspection',
+			source=Diagnosis.Source.RULE,
+		)
+
+	def payload(self, **overrides):
+		data = {
+			'diagnosis_id': self.diagnosis.id,
+			'conversation_id': str(self.conversation.id),
+			'customer_name': 'Avery Morgan',
+			'phone': '+1 555 123 4567',
+			'email': 'avery@example.com',
+			'vehicle_make': 'Toyota',
+			'vehicle_model': 'Corolla',
+			'vehicle_year': 2020,
+			'preferred_date': '2026-10-05',
+			'preferred_time': '10:30:00',
+			'service_address': '12 Main Street',
+		}
+		data.update(overrides)
+		return data
+
+	def test_valid_booking_creation_and_retrieval(self):
+		response = self.client.post('/api/booking/', self.payload(), format='json')
+
+		self.assertEqual(response.status_code, 201)
+		self.assertEqual(response.data['status'], Booking.Status.PENDING)
+		self.assertEqual(response.data['diagnosis_id'], self.diagnosis.id)
+		self.assertEqual(response.data['conversation_id'], str(self.conversation.id))
+
+		detail = self.client.get(f"/api/booking/{response.data['id']}/")
+		self.assertEqual(detail.status_code, 200)
+		self.assertEqual(detail.data['id'], response.data['id'])
+		self.assertEqual(detail.data['customer_name'], 'Avery Morgan')
+
+	def test_missing_required_fields(self):
+		response = self.client.post('/api/booking/', {'diagnosis_id': self.diagnosis.id}, format='json')
+
+		self.assertEqual(response.status_code, 400)
+		self.assertEqual(response.data['error']['code'], 'VALIDATION_ERROR')
+		self.assertIn('customer_name', response.data['error']['fields'])
+
+	def test_invalid_field_values(self):
+		response = self.client.post(
+			'/api/booking/',
+			self.payload(phone='bad', email='bad', preferred_date='not-a-date'),
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, 400)
+		self.assertIn('phone', response.data['error']['fields'])
+		self.assertIn('email', response.data['error']['fields'])
+		self.assertIn('preferred_date', response.data['error']['fields'])
+
+	def test_diagnosis_and_conversation_must_match(self):
+		other_conversation = Conversation.objects.create(session_id=str(uuid.uuid4()))
+
+		response = self.client.post(
+			'/api/booking/',
+			self.payload(conversation_id=str(other_conversation.id)),
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, 400)
+		self.assertIn('conversation_id', response.data['error']['fields'])
+
+	def test_missing_booking_returns_not_found(self):
+		response = self.client.get('/api/booking/999999/')
+
+		self.assertEqual(response.status_code, 404)
+		self.assertEqual(response.data['error']['code'], 'BOOKING_NOT_FOUND')

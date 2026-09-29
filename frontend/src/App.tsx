@@ -1,9 +1,10 @@
 import { useRef, useState } from 'react'
 import type { ChangeEvent, FormEvent, ReactNode } from 'react'
+import { createBooking, getBooking } from './api/bookingApi'
 import { sendChatMessage } from './api/chatApi'
 import { requestDiagnosis } from './api/diagnosisApi'
 import { maxUploadSizeBytes, uploadMedia, validateMediaFile } from './api/mediaApi'
-import type { AttachmentMetadata, AttachmentType, ChatStatus, DiagnosisResponse } from './api/types'
+import type { AttachmentMetadata, AttachmentType, BookingRequest, BookingResponse, ChatStatus, DiagnosisResponse } from './api/types'
 
 type Message = {
   id: number
@@ -40,6 +41,8 @@ function App() {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
   const [error, setError] = useState<string>()
+  const [bookingDiagnosis, setBookingDiagnosis] = useState<DiagnosisResponse>()
+  const [booking, setBooking] = useState<BookingResponse>()
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -163,7 +166,7 @@ function App() {
                     <p className="whitespace-pre-wrap text-[0.95rem] leading-7">{message.content}</p>
                     {message.attachment && <AttachmentPreview attachment={message.attachment} />}
                   </div>
-                  {message.diagnosis && <DiagnosisCard diagnosis={message.diagnosis} />}
+                  {message.diagnosis && <DiagnosisCard diagnosis={message.diagnosis} onBook={() => { setBookingDiagnosis(message.diagnosis); setBooking(undefined); setError(undefined) }} />}
                 </div>
               </div>
             ))}
@@ -171,16 +174,24 @@ function App() {
             {error && <div role="alert" className="rounded-xl border border-[#e2b7a8] bg-[#fff4ef] px-4 py-3 text-sm leading-6 text-[#8d4939]">{error}</div>}
           </div>
 
-          <form onSubmit={handleSubmit} className="border-t border-[#e5e1d8] bg-[#f7f5f0] p-4 sm:p-6">
-            <label htmlFor="message" className="sr-only">Describe your car problem</label>
-            <div className="flex items-end gap-2 rounded-2xl border border-[#d9d5cc] bg-white p-2 pl-3 shadow-sm focus-within:border-[#4e8a7b] focus-within:ring-2 focus-within:ring-[#4e8a7b]/20 sm:gap-3 sm:pl-4">
-              <input ref={fileInputRef} type="file" accept={mediaAccept} onChange={handleFileSelected} className="sr-only" disabled={isUploading} aria-label="Attach image, audio, or video" />
-              <button type="button" onClick={() => { if (!conversationId) { setError('Send a text message first. Media uploads need an active conversation.'); return } fileInputRef.current?.click() }} disabled={isUploading} className="flex h-11 shrink-0 items-center justify-center rounded-xl border border-[#d9d5cc] px-3 text-sm font-bold text-[#37534b] transition hover:bg-[#f3f1ec] disabled:cursor-not-allowed disabled:opacity-40" title="Attach image, audio, or video" aria-label="Attach image, audio, or video">{isUploading ? '...' : '+'}</button>
-              <textarea id="message" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="What is your car doing?" rows={1} disabled={isSubmitting} className="max-h-32 min-h-11 flex-1 resize-none bg-transparent py-2 text-sm leading-6 text-[#17221f] outline-none placeholder:text-[#9aa39e]" onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} />
-              <button type="submit" disabled={isSubmitting || !draft.trim()} className="flex h-11 shrink-0 items-center justify-center rounded-xl bg-[#163b36] px-3 text-sm font-bold text-white transition hover:bg-[#25554d] disabled:cursor-not-allowed disabled:opacity-40 sm:px-4">{isSubmitting ? 'Sending' : 'Send'}</button>
-            </div>
-            <p className="mt-3 text-center text-xs text-[#8a938d]">Uploads are stored with this conversation. Maximum {Math.round(maxUploadSizeBytes / (1024 * 1024))} MB per file.</p>
-          </form>
+          {bookingDiagnosis ? (
+            booking ? (
+              <BookingConfirmation booking={booking} diagnosis={bookingDiagnosis} onBack={() => { setBooking(undefined); setBookingDiagnosis(undefined) }} />
+            ) : (
+              <BookingForm diagnosis={bookingDiagnosis} conversationId={conversationId} onBack={() => setBookingDiagnosis(undefined)} onBooked={setBooking} />
+            )
+          ) : (
+            <form onSubmit={handleSubmit} className="border-t border-[#e5e1d8] bg-[#f7f5f0] p-4 sm:p-6">
+              <label htmlFor="message" className="sr-only">Describe your car problem</label>
+              <div className="flex items-end gap-2 rounded-2xl border border-[#d9d5cc] bg-white p-2 pl-3 shadow-sm focus-within:border-[#4e8a7b] focus-within:ring-2 focus-within:ring-[#4e8a7b]/20 sm:gap-3 sm:pl-4">
+                <input ref={fileInputRef} type="file" accept={mediaAccept} onChange={handleFileSelected} className="sr-only" disabled={isUploading} aria-label="Attach image, audio, or video" />
+                <button type="button" onClick={() => { if (!conversationId) { setError('Send a text message first. Media uploads need an active conversation.'); return } fileInputRef.current?.click() }} disabled={isUploading} className="flex h-11 shrink-0 items-center justify-center rounded-xl border border-[#d9d5cc] px-3 text-sm font-bold text-[#37534b] transition hover:bg-[#f3f1ec] disabled:cursor-not-allowed disabled:opacity-40" title="Attach image, audio, or video" aria-label="Attach image, audio, or video">{isUploading ? '...' : '+'}</button>
+                <textarea id="message" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="What is your car doing?" rows={1} disabled={isSubmitting} className="max-h-32 min-h-11 flex-1 resize-none bg-transparent py-2 text-sm leading-6 text-[#17221f] outline-none placeholder:text-[#9aa39e]" onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} />
+                <button type="submit" disabled={isSubmitting || !draft.trim()} className="flex h-11 shrink-0 items-center justify-center rounded-xl bg-[#163b36] px-3 text-sm font-bold text-white transition hover:bg-[#25554d] disabled:cursor-not-allowed disabled:opacity-40 sm:px-4">{isSubmitting ? 'Sending' : 'Send'}</button>
+              </div>
+              <p className="mt-3 text-center text-xs text-[#8a938d]">Uploads are stored with this conversation. Maximum {Math.round(maxUploadSizeBytes / (1024 * 1024))} MB per file.</p>
+            </form>
+          )}
         </section>
       </div>
     </main>
@@ -197,8 +208,92 @@ function AttachmentPreview({ attachment }: { attachment: AttachmentMetadata }) {
   return <div className="mt-1"><p className="text-xs font-semibold text-[#53635c]">{attachment.filename} · {formatFileSize(attachment.file_size)}</p>{previewByType[attachment.file_type]}</div>
 }
 
-function DiagnosisCard({ diagnosis }: { diagnosis: DiagnosisResponse }) {
-  const [bookingRequested, setBookingRequested] = useState(false)
+type BookingDraft = Omit<BookingRequest, 'diagnosis_id' | 'conversation_id' | 'vehicle_year'> & { vehicle_year: string }
+
+const emptyBookingDraft: BookingDraft = {
+  customer_name: '',
+  phone: '',
+  email: '',
+  vehicle_make: '',
+  vehicle_model: '',
+  vehicle_year: '',
+  preferred_date: '',
+  preferred_time: '',
+  service_address: '',
+}
+
+function BookingForm({ diagnosis, conversationId, onBack, onBooked }: { diagnosis: DiagnosisResponse; conversationId: string | undefined; onBack: () => void; onBooked: (booking: BookingResponse) => void }) {
+  const [draft, setDraft] = useState<BookingDraft>(emptyBookingDraft)
+  const [error, setError] = useState<string>()
+  const [isSubmitting, setIsSubmitting] = useState(false)
+
+  function updateField(field: keyof BookingDraft, value: string) {
+    setDraft((current) => ({ ...current, [field]: value }))
+  }
+
+  async function handleBookingSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!conversationId || !diagnosis.diagnosis_id) {
+      setError('A finalized diagnosis and active conversation are required to book a mechanic.')
+      return
+    }
+    if (!draft.customer_name.trim() || !draft.phone.trim() || !draft.preferred_date || !draft.preferred_time || !draft.service_address.trim()) {
+      setError('Complete your name, phone, preferred date, preferred time, and service address.')
+      return
+    }
+    if (!/^[0-9+().\-\s]{7,50}$/.test(draft.phone) || draft.phone.replace(/\D/g, '').length < 7) {
+      setError('Enter a valid phone number.')
+      return
+    }
+    if (draft.vehicle_year && (!/^\d{4}$/.test(draft.vehicle_year) || Number(draft.vehicle_year) < 1886 || Number(draft.vehicle_year) > 2100)) {
+      setError('Enter a valid vehicle year.')
+      return
+    }
+
+    setError(undefined)
+    setIsSubmitting(true)
+    try {
+      const created = await createBooking({
+        diagnosis_id: diagnosis.diagnosis_id,
+        conversation_id: conversationId,
+        ...draft,
+        vehicle_year: draft.vehicle_year ? Number(draft.vehicle_year) : null,
+      })
+      onBooked(await getBooking(created.id))
+    } catch (bookingError) {
+      setError(bookingError instanceof Error ? bookingError.message : 'The booking could not be completed. Please try again.')
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  const fieldClass = 'mt-1 w-full rounded-xl border border-[#d9d5cc] bg-white px-3 py-2.5 text-sm text-[#17221f] outline-none focus:border-[#4e8a7b] focus:ring-2 focus:ring-[#4e8a7b]/20'
+
+  return (
+    <form onSubmit={handleBookingSubmit} className="max-h-[48vh] overflow-y-auto border-t border-[#e5e1d8] bg-[#f7f5f0] p-4 sm:p-6">
+      <div className="mb-5 flex items-start justify-between gap-4"><div><p className="text-xs font-bold uppercase tracking-[0.14em] text-[#718078]">Book a mechanic</p><h3 className="mt-1 text-xl font-semibold">Request service for your diagnosis</h3><p className="mt-2 text-sm leading-6 text-[#53635c]">{diagnosis.diagnosis} · {diagnosis.recommended_service ?? 'Vehicle inspection'}</p></div><button type="button" onClick={onBack} className="shrink-0 rounded-lg px-2 py-1 text-sm font-semibold text-[#53756a] hover:bg-white">Back</button></div>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <label className="text-sm font-semibold">Full name<input required value={draft.customer_name} onChange={(event) => updateField('customer_name', event.target.value)} className={fieldClass} autoComplete="name" /></label>
+        <label className="text-sm font-semibold">Phone number<input required type="tel" value={draft.phone} onChange={(event) => updateField('phone', event.target.value)} className={fieldClass} autoComplete="tel" /></label>
+        <label className="text-sm font-semibold">Email<input type="email" value={draft.email} onChange={(event) => updateField('email', event.target.value)} className={fieldClass} autoComplete="email" /></label>
+        <label className="text-sm font-semibold">Vehicle make<input value={draft.vehicle_make} onChange={(event) => updateField('vehicle_make', event.target.value)} className={fieldClass} /></label>
+        <label className="text-sm font-semibold">Vehicle model<input value={draft.vehicle_model} onChange={(event) => updateField('vehicle_model', event.target.value)} className={fieldClass} /></label>
+        <label className="text-sm font-semibold">Vehicle year<input inputMode="numeric" value={draft.vehicle_year} onChange={(event) => updateField('vehicle_year', event.target.value)} className={fieldClass} placeholder="Optional" /></label>
+        <label className="text-sm font-semibold">Preferred date<input required type="date" value={draft.preferred_date} onChange={(event) => updateField('preferred_date', event.target.value)} className={fieldClass} /></label>
+        <label className="text-sm font-semibold">Preferred time<input required type="time" value={draft.preferred_time} onChange={(event) => updateField('preferred_time', event.target.value)} className={fieldClass} /></label>
+        <label className="text-sm font-semibold sm:col-span-2">Service address<textarea required rows={2} value={draft.service_address} onChange={(event) => updateField('service_address', event.target.value)} className={`${fieldClass} resize-y`} autoComplete="street-address" /></label>
+      </div>
+      {error && <p role="alert" className="mt-4 rounded-xl border border-[#e2b7a8] bg-[#fff4ef] px-4 py-3 text-sm leading-6 text-[#8d4939]">{error}</p>}
+      <div className="mt-5 flex flex-wrap items-center justify-end gap-3"><button type="button" onClick={onBack} disabled={isSubmitting} className="rounded-xl px-4 py-2.5 text-sm font-bold text-[#53756a] hover:bg-white disabled:opacity-40">Return to chat</button><button type="submit" disabled={isSubmitting} className="rounded-xl bg-[#163b36] px-4 py-2.5 text-sm font-bold text-white hover:bg-[#25554d] disabled:cursor-not-allowed disabled:opacity-40">{isSubmitting ? 'Submitting...' : 'Request booking'}</button></div>
+    </form>
+  )
+}
+
+function BookingConfirmation({ booking, diagnosis, onBack }: { booking: BookingResponse; diagnosis: DiagnosisResponse; onBack: () => void }) {
+  return <section className="border-t border-[#cce2d4] bg-[#edf7f0] p-5 text-[#21483a] sm:p-6"><p className="text-xs font-bold uppercase tracking-[0.14em] text-[#4c806b]">Booking requested</p><h3 className="mt-1 text-2xl font-semibold">Your request is pending</h3><p className="mt-2 text-sm leading-6">Booking #{booking.id} has been saved and is currently <strong>{booking.status}</strong>.</p><div className="mt-5 grid gap-3 text-sm sm:grid-cols-2"><p><span className="font-bold">Service:</span> {diagnosis.recommended_service ?? diagnosis.diagnosis}</p><p><span className="font-bold">Customer:</span> {booking.customer_name}</p><p><span className="font-bold">Vehicle:</span> {[booking.vehicle_year, booking.vehicle_make, booking.vehicle_model].filter(Boolean).join(' ') || 'Not provided'}</p><p><span className="font-bold">When:</span> {booking.preferred_date} at {booking.preferred_time}</p></div><button type="button" onClick={onBack} className="mt-5 rounded-xl bg-[#163b36] px-4 py-2.5 text-sm font-bold text-white hover:bg-[#25554d]">Return to conversation</button></section>
+}
+
+function DiagnosisCard({ diagnosis, onBook }: { diagnosis: DiagnosisResponse; onBook: () => void }) {
   const sourceLabel = diagnosis.source === 'gemini' ? 'Gemini-assisted' : diagnosis.source === 'hybrid' ? 'Rule engine + Gemini' : 'Rule engine'
 
   return (
@@ -213,8 +308,7 @@ function DiagnosisCard({ diagnosis }: { diagnosis: DiagnosisResponse }) {
       {diagnosis.recommended_service && <div className="mt-4 border-t border-[#cce2d4] pt-3"><p className="text-xs font-bold uppercase tracking-[0.12em] text-[#628878]">Recommended service</p><p className="mt-1 text-sm leading-6">{diagnosis.recommended_service}</p></div>}
       {diagnosis.safety_guidance && <div className="mt-4 border-t border-[#cce2d4] pt-3"><p className="text-xs font-bold uppercase tracking-[0.12em] text-[#628878]">Safety guidance</p><p className="mt-1 text-sm leading-6">{diagnosis.safety_guidance}</p></div>}
       <div className="mt-5 flex flex-wrap items-center gap-3">
-        <button type="button" onClick={() => setBookingRequested(true)} className="rounded-xl bg-[#163b36] px-4 py-2.5 text-sm font-bold text-white transition hover:bg-[#25554d]">Book Mechanic</button>
-        {bookingRequested && <p className="text-xs font-semibold text-[#4c806b]">Booking will be available in the next step.</p>}
+        <button type="button" onClick={onBook} className="rounded-xl bg-[#163b36] px-4 py-2.5 text-sm font-bold text-white transition hover:bg-[#25554d]">Book Mechanic</button>
       </div>
     </section>
   )

@@ -3,15 +3,19 @@ from rest_framework.exceptions import NotFound
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from .models import Booking
 from .serializers import (
 	ChatRequestSerializer,
 	ChatResponseSerializer,
+	BookingRequestSerializer,
+	BookingResponseSerializer,
 	DiagnosisRequestSerializer,
 	DiagnosisResponseSerializer,
 	UploadRequestSerializer,
 	UploadResponseSerializer,
 )
 from .services.chat_service import ChatService
+from .services.booking_service import BookingService
 from .services.diagnosis_service import DiagnosisService
 from .services.media_service import MediaUploadError, MediaUploadService
 
@@ -87,6 +91,28 @@ class DiagnosisAPIView(APIView):
 
 		result = DiagnosisService().diagnose(serializer.validated_data['conversation_id'])
 		return Response(DiagnosisResponseSerializer(result.data).data)
+
+
+class BookingAPIView(APIView):
+	def post(self, request):
+		serializer = BookingRequestSerializer(data=request.data)
+		if not serializer.is_valid():
+			fields = {
+				field: [str(error) for error in errors]
+				for field, errors in serializer.errors.items()
+			}
+			message = next(iter(fields.values()))[0]
+			return _error_response('VALIDATION_ERROR', message, fields)
+
+		result = BookingService().create(serializer.validated_data)
+		return Response(BookingResponseSerializer(result.booking).data, status=status.HTTP_201_CREATED)
+
+	def get(self, request, booking_id):
+		try:
+			result = BookingService().get(booking_id)
+		except Booking.DoesNotExist:
+			return _error_response('BOOKING_NOT_FOUND', 'Booking not found.', http_status=status.HTTP_404_NOT_FOUND)
+		return Response(BookingResponseSerializer(result.booking).data)
 
 
 class UploadAPIView(APIView):

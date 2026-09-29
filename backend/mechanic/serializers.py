@@ -1,7 +1,9 @@
+import re
+
 from rest_framework import serializers
 from rest_framework.exceptions import NotFound
 
-from .models import Conversation
+from .models import Booking, Conversation, Diagnosis
 
 
 class ChatRequestSerializer(serializers.Serializer):
@@ -76,3 +78,63 @@ class DiagnosisResponseSerializer(serializers.Serializer):
     safety_guidance = serializers.CharField(allow_null=True)
     source = serializers.CharField(allow_null=True)
     message = serializers.CharField(allow_null=True)
+
+
+class BookingRequestSerializer(serializers.Serializer):
+    diagnosis_id = serializers.IntegerField(required=True)
+    conversation_id = serializers.UUIDField(required=True)
+    customer_name = serializers.CharField(required=True, max_length=255, trim_whitespace=True)
+    phone = serializers.CharField(required=True, max_length=50, trim_whitespace=True)
+    email = serializers.EmailField(required=False, allow_blank=True)
+    vehicle_make = serializers.CharField(required=False, allow_blank=True, max_length=100, trim_whitespace=True)
+    vehicle_model = serializers.CharField(required=False, allow_blank=True, max_length=100, trim_whitespace=True)
+    vehicle_year = serializers.IntegerField(required=False, allow_null=True)
+    preferred_date = serializers.DateField(required=True)
+    preferred_time = serializers.TimeField(required=True)
+    service_address = serializers.CharField(required=True, trim_whitespace=True)
+
+    def validate_phone(self, value):
+        if not re.fullmatch(r'[0-9+().\-\s]{7,50}', value) or sum(character.isdigit() for character in value) < 7:
+            raise serializers.ValidationError('Enter a valid phone number.')
+        return value
+
+    def validate_vehicle_year(self, value):
+        if value < 1886 or value > 2100:
+            raise serializers.ValidationError('Enter a valid vehicle year.')
+        return value
+
+    def validate(self, attrs):
+        try:
+            diagnosis = Diagnosis.objects.select_related('conversation').get(pk=attrs['diagnosis_id'])
+        except Diagnosis.DoesNotExist as exc:
+            raise serializers.ValidationError({'diagnosis_id': 'Diagnosis not found.'}) from exc
+        if diagnosis.conversation_id != attrs['conversation_id']:
+            raise serializers.ValidationError(
+                {'conversation_id': 'Conversation does not match the diagnosis.'}
+            )
+        attrs['_diagnosis'] = diagnosis
+        return attrs
+
+
+class BookingResponseSerializer(serializers.ModelSerializer):
+    diagnosis_id = serializers.IntegerField(read_only=True)
+    conversation_id = serializers.UUIDField(read_only=True)
+
+    class Meta:
+        model = Booking
+        fields = (
+            'id',
+            'diagnosis_id',
+            'conversation_id',
+            'customer_name',
+            'phone',
+            'email',
+            'vehicle_make',
+            'vehicle_model',
+            'vehicle_year',
+            'preferred_date',
+            'preferred_time',
+            'service_address',
+            'status',
+            'created_at',
+        )
