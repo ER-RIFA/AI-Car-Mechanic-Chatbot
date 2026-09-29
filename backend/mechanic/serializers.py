@@ -1,0 +1,33 @@
+from rest_framework import serializers
+from rest_framework.exceptions import NotFound
+
+from .models import Conversation
+
+
+class ChatRequestSerializer(serializers.Serializer):
+    conversation_id = serializers.UUIDField(required=False, allow_null=True)
+    message = serializers.CharField(required=True, allow_blank=False, trim_whitespace=True)
+
+    def validate_message(self, value):
+        if not value.strip():
+            raise serializers.ValidationError('Message cannot be empty.')
+        return value.strip()
+
+    def validate_conversation_id(self, value):
+        if value is not None and not Conversation.objects.filter(pk=value).exists():
+            raise NotFound('Conversation not found.')
+        return value
+
+
+class ChatResponseSerializer(serializers.Serializer):
+    conversation_id = serializers.UUIDField()
+    status = serializers.CharField()
+    reply = serializers.CharField()
+    diagnosis = serializers.CharField(allow_null=True)
+    possible_diagnoses = serializers.ListField(child=serializers.CharField())
+    recommended_service = serializers.CharField(allow_null=True)
+    safety_guidance = serializers.CharField(allow_null=True)
+    matched_rule = serializers.CharField(allow_null=True)
+    matched_rules = serializers.ListField(child=serializers.DictField())
+    missing_information = serializers.ListField(child=serializers.CharField())
+    next_follow_up_question = serializers.CharField(allow_null=True)

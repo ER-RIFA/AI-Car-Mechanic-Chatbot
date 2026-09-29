@@ -1,0 +1,160 @@
+import json
+import uuid
+from dataclasses import dataclass
+from typing import Any
+
+from django.db import transaction
+
+from mechanic.diagnostic_engine import DiagnosticEngine, MatchStatus
+from mechanic.diagnostic_engine.normalizer import normalize_text
+from mechanic.diagnostic_engine.rules import DiagnosticRule
+
+from ..models import Conversation, Diagnosis, Message
+
+
+UNSUPPORTED_REPLY = (
+    "I can help with vehicle symptoms, maintenance, repairs, and service bookings. "
+    "I can't help with that topic."
+)
+AMBIGUOUS_REPLY = (
+    "I found more than one possible vehicle issue. Could you provide more specific "
+    "details about when the symptom happens and what you notice?"
+)
+
+
+@dataclass(frozen=True)
+class ChatServiceResult:
+    data: dict[str, Any]
+    created: bool
+
+
+class ChatService:
+    """Coordinate conversation persistence and deterministic diagnosis."""
+
+    def __init__(self, engine: DiagnosticEngine | None = None) -> None:
+        self.engine = engine or DiagnosticEngine()
+
+    @transaction.atomic
+    def process_message(
+        self,
+        message: str,
+        conversation_id: uuid.UUID | None = None,
+    ) -> ChatServiceResult:
+        conversation, created = self._get_or_create_conversation(conversation_id)
+        context = self._build_context(conversation)
+
+        Message.objects.create(
+            conversation=conversation,
+            role=Message.Role.USER,
+            content=message,
+        )
+        engine_result = self.engine.match(message, context)
+        response = self._build_response(conversation, engine_result)
+
+        Message.objects.create(
+            conversation=conversation,
+            role=Message.Role.ASSISTANT,
+            content=response['reply'],
+        )
+        if engine_result.status == MatchStatus.MATCHED and engine_result.matched_rule:
+            self._save_diagnosis(conversation, engine_result, response)
+
+        conversation.save(update_fields=['updated_at'])
+        return ChatServiceResult(response, created)
+
+    def _get_or_create_conversation(
+        self,
+        conversation_id: uuid.UUID | None,
+    ) -> tuple[Conversation, bool]:
+        if conversation_id is not None:
+            return Conversation.objects.get(pk=conversation_id), False
+        return Conversation.objects.create(session_id=str(uuid.uuid4())), True
+
+    def _build_context(self, conversation: Conversation) -> dict[str, Any]:
+        previous_messages = list(
+            conversation.messages.filter(role=Message.Role.USER)
+            .order_by('-created_at')
+            .values_list('content', flat=True)[:6]
+        )
+        previous_messages.reverse()
+        if not previous_messages:
+            return {}
+
+        prior_result = self.engine.match(' '.join(previous_messages))
+        context: dict[str, Any] = {'previous_messages': previous_messages}
+        if prior_result.matched_rule:
+            context['matched_rule'] = prior_result.matched_rule.rule_id
+        return context
+
+    def _build_response(self, conversation: Conversation, engine_result: Any) -> dict[str, Any]:
+        status = engine_result.status
+        diagnosis = None
+        recommended_service = None
+        if status == MatchStatus.UNSUPPORTED:
+            reply = UNSUPPORTED_REPLY
+        elif status == MatchStatus.AMBIGUOUS:
+            reply = AMBIGUOUS_REPLY
+        elif status == MatchStatus.NEEDS_INFORMATION:
+            reply = engine_result.next_follow_up_question or (
+                'Could you provide more information about the vehicle symptom?'
+            )
+        else:
+            diagnosis = '; '.join(engine_result.possible_diagnoses)
+            recommended_service = engine_result.recommended_service
+            reply = f'Based on the information provided, possible issue(s): {diagnosis}.'
+
+        return {
+            'conversation_id': str(conversation.id),
+            'status': status.value,
+            'reply': reply,
+            'diagnosis': diagnosis,
+            'possible_diagnoses': list(engine_result.possible_diagnoses),
+            'recommended_service': recommended_service,
+            'safety_guidance': engine_result.safety_guidance,
+            'matched_rule': engine_result.matched_rule.rule_id if engine_result.matched_rule else None,
+            'matched_rules': [
+                {
+                    'rule_id': match.rule.rule_id,
+                    'score': match.score,
+                    'matched_groups': list(match.matched_groups),
+                }
+                for match in engine_result.matched_rules
+            ],
+            'missing_information': list(engine_result.missing_information),
+            'next_follow_up_question': engine_result.next_follow_up_question,
+        }
+
+    def _save_diagnosis(self, conversation: Conversation, engine_result: Any, response: dict[str, Any]) -> None:
+        rule = engine_result.matched_rule
+        previous_user_messages = list(
+            conversation.messages.filter(role=Message.Role.USER).values_list('content', flat=True)
+        )
+        diagnosis_data = {
+            'symptoms': list(engine_result.collected_symptoms),
+            'follow_up_answers': self._collect_follow_up_answers(rule, previous_user_messages),
+            'result': json.dumps(response, sort_keys=True),
+            'recommended_service': engine_result.recommended_service or '',
+            'source': Diagnosis.Source.RULE,
+        }
+        diagnosis = conversation.diagnoses.order_by('-created_at').first()
+        if diagnosis is None:
+            Diagnosis.objects.create(conversation=conversation, **diagnosis_data)
+        else:
+            for field, value in diagnosis_data.items():
+                setattr(diagnosis, field, value)
+            diagnosis.save(update_fields=[*diagnosis_data, 'created_at'])
+
+    def _collect_follow_up_answers(
+        self,
+        rule: DiagnosticRule,
+        messages: list[str],
+    ) -> dict[str, str]:
+        text = normalize_text(' '.join(messages))
+        answers = {}
+        for key in rule.required_information:
+            signal = next(
+                (candidate for candidate in rule.information_signals[key] if candidate in text),
+                'provided in conversation',
+            )
+            answers[key] = signal
+        return answers

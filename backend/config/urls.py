@@ -19,8 +19,11 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import path
 
+from mechanic.views import ChatAPIView
+
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('api/chat/', ChatAPIView.as_view(), name='chat'),
 ]
 
 if settings.DEBUG:
