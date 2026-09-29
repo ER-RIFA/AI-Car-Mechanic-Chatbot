@@ -1,13 +1,15 @@
-import { useState } from 'react'
-import type { FormEvent } from 'react'
+import { useRef, useState } from 'react'
+import type { ChangeEvent, FormEvent, ReactNode } from 'react'
 import { sendChatMessage } from './api/chatApi'
-import type { ChatStatus } from './api/types'
+import { maxUploadSizeBytes, uploadMedia, validateMediaFile } from './api/mediaApi'
+import type { AttachmentMetadata, AttachmentType, ChatStatus } from './api/types'
 
 type Message = {
   id: number
   role: 'user' | 'assistant'
   content: string
   status?: ChatStatus
+  attachment?: AttachmentMetadata
 }
 
 const statusLabels: Record<ChatStatus, string> = {
@@ -23,12 +25,20 @@ const initialMessage: Message = {
   content: 'Tell me what your vehicle is doing, and I will help you think through the next useful detail.',
 }
 
+const mediaAccept = '.jpg,.jpeg,.png,.webp,.mp3,.wav,.ogg,.mp4,.mov,.webm,image/jpeg,image/png,image/webp,audio/mpeg,audio/wav,audio/ogg,audio/webm,video/mp4,video/quicktime,video/webm'
+
+function formatFileSize(bytes: number) {
+  return `${(bytes / (1024 * 1024)).toFixed(bytes >= 1024 * 1024 ? 1 : 2)} MB`
+}
+
 function App() {
   const [messages, setMessages] = useState<Message[]>([initialMessage])
   const [conversationId, setConversationId] = useState<string>()
   const [draft, setDraft] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [isUploading, setIsUploading] = useState(false)
   const [error, setError] = useState<string>()
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -56,6 +66,41 @@ function App() {
       setError(requestError instanceof Error ? requestError.message : 'The assistant could not respond. Please try again.')
     } finally {
       setIsSubmitting(false)
+    }
+  }
+
+  async function handleFileSelected(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    setError(undefined)
+
+    if (!file) {
+      setError('Choose a file before uploading.')
+      return
+    }
+    if (!conversationId) {
+      setError('Send a text message first. Media uploads need an active conversation.')
+      return
+    }
+    const validationError = validateMediaFile(file)
+    if (validationError) {
+      setError(validationError)
+      return
+    }
+
+    setIsUploading(true)
+    try {
+      const response = await uploadMedia({ conversation_id: conversationId, file })
+      setMessages((current) => [...current, {
+        id: Date.now(),
+        role: 'user',
+        content: `Uploaded ${response.attachment.filename}`,
+        attachment: response.attachment,
+      }])
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : 'The media upload failed. Please try again.')
+    } finally {
+      setIsUploading(false)
     }
   }
 
@@ -90,28 +135,41 @@ function App() {
           <div className="flex-1 space-y-5 overflow-y-auto px-5 py-6 sm:px-8 sm:py-8" aria-live="polite">
             {messages.map((message) => (
               <div key={message.id} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={message.role === 'user' ? 'max-w-[85%] rounded-2xl rounded-br-md bg-[#e9a44b] px-4 py-3 text-[#17221f] sm:max-w-[70%]' : 'max-w-[90%] rounded-2xl rounded-bl-md border border-[#e3dfd6] bg-white px-4 py-3 text-[#30403a] shadow-sm sm:max-w-[75%]'}>
+                <div className={message.role === 'user' ? 'max-w-[90%] rounded-2xl rounded-br-md bg-[#e9a44b] px-4 py-3 text-[#17221f] sm:max-w-[72%]' : 'max-w-[90%] rounded-2xl rounded-bl-md border border-[#e3dfd6] bg-white px-4 py-3 text-[#30403a] shadow-sm sm:max-w-[75%]'}>
                   {message.status && <p className="mb-2 text-xs font-bold uppercase tracking-[0.12em] text-[#718078]">{statusLabels[message.status]}</p>}
                   <p className="whitespace-pre-wrap text-[0.95rem] leading-7">{message.content}</p>
+                  {message.attachment && <AttachmentPreview attachment={message.attachment} />}
                 </div>
               </div>
             ))}
-            {isSubmitting && <div className="flex justify-start"><div className="rounded-2xl rounded-bl-md border border-[#e3dfd6] bg-white px-4 py-4 shadow-sm"><div className="flex items-center gap-1.5" aria-label="Assistant is typing"><span className="typing-dot" /><span className="typing-dot [animation-delay:120ms]" /><span className="typing-dot [animation-delay:240ms]" /></div></div></div>}
+            {(isSubmitting || isUploading) && <div className="flex justify-start"><div className="rounded-2xl rounded-bl-md border border-[#e3dfd6] bg-white px-4 py-4 shadow-sm"><div className="flex items-center gap-1.5" aria-label={isUploading ? 'Media is uploading' : 'Assistant is typing'}><span className="typing-dot" /><span className="typing-dot [animation-delay:120ms]" /><span className="typing-dot [animation-delay:240ms]" /></div><p className="mt-2 text-xs text-[#718078]">{isUploading ? 'Uploading media...' : 'Thinking...'}</p></div></div>}
             {error && <div role="alert" className="rounded-xl border border-[#e2b7a8] bg-[#fff4ef] px-4 py-3 text-sm leading-6 text-[#8d4939]">{error}</div>}
           </div>
 
           <form onSubmit={handleSubmit} className="border-t border-[#e5e1d8] bg-[#f7f5f0] p-4 sm:p-6">
             <label htmlFor="message" className="sr-only">Describe your car problem</label>
-            <div className="flex items-end gap-3 rounded-2xl border border-[#d9d5cc] bg-white p-2 pl-4 shadow-sm focus-within:border-[#4e8a7b] focus-within:ring-2 focus-within:ring-[#4e8a7b]/20">
+            <div className="flex items-end gap-2 rounded-2xl border border-[#d9d5cc] bg-white p-2 pl-3 shadow-sm focus-within:border-[#4e8a7b] focus-within:ring-2 focus-within:ring-[#4e8a7b]/20 sm:gap-3 sm:pl-4">
+              <input ref={fileInputRef} type="file" accept={mediaAccept} onChange={handleFileSelected} className="sr-only" disabled={isUploading} aria-label="Attach image, audio, or video" />
+              <button type="button" onClick={() => { if (!conversationId) { setError('Send a text message first. Media uploads need an active conversation.'); return } fileInputRef.current?.click() }} disabled={isUploading} className="flex h-11 shrink-0 items-center justify-center rounded-xl border border-[#d9d5cc] px-3 text-sm font-bold text-[#37534b] transition hover:bg-[#f3f1ec] disabled:cursor-not-allowed disabled:opacity-40" title="Attach image, audio, or video" aria-label="Attach image, audio, or video">{isUploading ? '...' : '+'}</button>
               <textarea id="message" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="What is your car doing?" rows={1} disabled={isSubmitting} className="max-h-32 min-h-11 flex-1 resize-none bg-transparent py-2 text-sm leading-6 text-[#17221f] outline-none placeholder:text-[#9aa39e]" onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} />
-              <button type="submit" disabled={isSubmitting || !draft.trim()} className="flex h-11 shrink-0 items-center justify-center rounded-xl bg-[#163b36] px-4 text-sm font-bold text-white transition hover:bg-[#25554d] disabled:cursor-not-allowed disabled:opacity-40">{isSubmitting ? 'Sending' : 'Send'}</button>
+              <button type="submit" disabled={isSubmitting || !draft.trim()} className="flex h-11 shrink-0 items-center justify-center rounded-xl bg-[#163b36] px-3 text-sm font-bold text-white transition hover:bg-[#25554d] disabled:cursor-not-allowed disabled:opacity-40 sm:px-4">{isSubmitting ? 'Sending' : 'Send'}</button>
             </div>
-            <p className="mt-3 text-center text-xs text-[#8a938d]">Do not use this chat for emergencies or immediate safety concerns.</p>
+            <p className="mt-3 text-center text-xs text-[#8a938d]">Uploads are stored with this conversation. Maximum {Math.round(maxUploadSizeBytes / (1024 * 1024))} MB per file.</p>
           </form>
         </section>
       </div>
     </main>
   )
+}
+
+function AttachmentPreview({ attachment }: { attachment: AttachmentMetadata }) {
+  const previewByType: Record<AttachmentType, ReactNode> = {
+    image: <img src={attachment.url} alt={attachment.filename} className="mt-3 max-h-72 max-w-full rounded-xl object-contain" />,
+    audio: <audio className="mt-3 w-full max-w-sm" controls src={attachment.url}>Your browser cannot play this audio file.</audio>,
+    video: <video className="mt-3 max-h-72 max-w-full rounded-xl" controls preload="metadata" src={attachment.url}>Your browser cannot play this video file.</video>,
+  }
+
+  return <div className="mt-1"><p className="text-xs font-semibold text-[#53635c]">{attachment.filename} · {formatFileSize(attachment.file_size)}</p>{previewByType[attachment.file_type]}</div>
 }
 
 export default App

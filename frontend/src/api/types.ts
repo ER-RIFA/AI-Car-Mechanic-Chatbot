@@ -30,3 +30,24 @@ export interface ChatErrorBody {
     fields?: Record<string, string[]>
   }
 }
+
+export type AttachmentType = 'image' | 'audio' | 'video'
+
+export interface UploadRequest {
+  conversation_id: string
+  file: File
+}
+
+export interface AttachmentMetadata {
+  id: number
+  file_type: AttachmentType
+  file_size: number
+  url: string
+  filename: string
+}
+
+export interface UploadResponse {
+  conversation_id: string
+  message_id: number
+  attachment: AttachmentMetadata
+}
