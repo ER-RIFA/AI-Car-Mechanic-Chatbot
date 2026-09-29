@@ -1,9 +1,15 @@
+import shutil
+import tempfile
 import uuid
 
+from django.core.files.storage import default_storage
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
+from django.test.utils import override_settings
+from django.utils.functional import empty
 from rest_framework.test import APIClient
 
-from .models import Conversation, Diagnosis, Message
+from .models import Conversation, Diagnosis, MediaAttachment, Message
 
 
 class ChatAPITests(TestCase):
@@ -105,3 +111,96 @@ class ChatAPITests(TestCase):
 		messages = Message.objects.filter(conversation_id=response.data['conversation_id'])
 		assistant_message = messages.get(role=Message.Role.ASSISTANT)
 		self.assertEqual(assistant_message.content, response.data['reply'])
+
+
+class MediaUploadAPITests(TestCase):
+	def setUp(self):
+		self.media_root = tempfile.mkdtemp()
+		self.settings_override = override_settings(MEDIA_ROOT=self.media_root)
+		self.settings_override.enable()
+		default_storage._wrapped = empty
+		self.client = APIClient()
+		self.url = '/api/upload/'
+		self.conversation = Conversation.objects.create(session_id=str(uuid.uuid4()))
+
+	def tearDown(self):
+		default_storage._wrapped = empty
+		self.settings_override.disable()
+		shutil.rmtree(self.media_root, ignore_errors=True)
+
+	def upload(self, name, content, content_type, conversation_id=None):
+		return self.client.post(
+			self.url,
+			{
+				'conversation_id': str(conversation_id or self.conversation.id),
+				'file': SimpleUploadedFile(name, content, content_type=content_type),
+			},
+			format='multipart',
+		)
+
+	def test_valid_image_upload_creates_image_message_and_attachment(self):
+		response = self.upload('inspection.jpg', b'\xff\xd8\xff\xe0image', 'image/jpeg')
+
+		self.assertEqual(response.status_code, 201)
+		self.assertEqual(response.data['attachment']['file_type'], 'image')
+		self.assertTrue(response.data['attachment']['url'].startswith('/media/'))
+		message = self.conversation.messages.get()
+		attachment = self.conversation.media_attachments.get()
+		self.assertEqual(message.message_type, Message.MessageType.IMAGE)
+		self.assertEqual(attachment.message_id, message.id)
+		self.assertTrue(default_storage.exists(attachment.file.name))
+
+	def test_valid_audio_upload(self):
+		response = self.upload('engine.mp3', b'ID3\x04\x00audio', 'audio/mpeg')
+
+		self.assertEqual(response.status_code, 201)
+		self.assertEqual(response.data['attachment']['file_type'], 'audio')
+		self.assertEqual(self.conversation.messages.get().message_type, Message.MessageType.AUDIO)
+
+	def test_valid_video_upload(self):
+		response = self.upload('walkaround.mp4', b'\x00\x00\x00\x18ftypisom', 'video/mp4')
+
+		self.assertEqual(response.status_code, 201)
+		self.assertEqual(response.data['attachment']['file_type'], 'video')
+		self.assertEqual(self.conversation.messages.get().message_type, Message.MessageType.VIDEO)
+
+	def test_missing_file(self):
+		response = self.client.post(
+			self.url,
+			{'conversation_id': str(self.conversation.id)},
+			format='multipart',
+		)
+
+		self.assertEqual(response.status_code, 400)
+		self.assertEqual(response.data['error']['code'], 'VALIDATION_ERROR')
+		self.assertIn('file', response.data['error']['fields'])
+
+	def test_invalid_conversation_id(self):
+		response = self.upload('inspection.jpg', b'\xff\xd8\xff\xe0image', 'image/jpeg', uuid.uuid4())
+
+		self.assertEqual(response.status_code, 404)
+		self.assertEqual(response.data['error']['code'], 'CONVERSATION_NOT_FOUND')
+
+	def test_unsupported_file_type(self):
+		response = self.upload('notes.txt', b'plain text', 'text/plain')
+
+		self.assertEqual(response.status_code, 415)
+		self.assertEqual(response.data['error']['code'], 'UNSUPPORTED_MEDIA_TYPE')
+
+	def test_oversized_file(self):
+		with self.settings(MAX_UPLOAD_SIZE_BYTES=4):
+			response = self.upload('large.jpg', b'\xff\xd8\xff\xe0large', 'image/jpeg')
+
+		self.assertEqual(response.status_code, 413)
+		self.assertEqual(response.data['error']['code'], 'FILE_TOO_LARGE')
+
+	def test_response_metadata_and_database_records(self):
+		content = b'\x89PNG\r\n\x1a\nimage-data'
+		response = self.upload('inspection.png', content, 'image/png')
+
+		self.assertEqual(response.data['conversation_id'], str(self.conversation.id))
+		self.assertEqual(response.data['message_id'], self.conversation.messages.get().id)
+		self.assertEqual(response.data['attachment']['file_size'], len(content))
+		self.assertTrue(response.data['attachment']['filename'].endswith('.png'))
+		self.assertEqual(MediaAttachment.objects.count(), 1)
+		self.assertEqual(Message.objects.count(), 1)

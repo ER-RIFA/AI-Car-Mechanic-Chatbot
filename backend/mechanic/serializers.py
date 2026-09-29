@@ -31,3 +31,27 @@ class ChatResponseSerializer(serializers.Serializer):
     matched_rules = serializers.ListField(child=serializers.DictField())
     missing_information = serializers.ListField(child=serializers.CharField())
     next_follow_up_question = serializers.CharField(allow_null=True)
+
+
+class UploadRequestSerializer(serializers.Serializer):
+    conversation_id = serializers.UUIDField(required=True)
+    file = serializers.FileField(required=True, allow_empty_file=False)
+
+    def validate_conversation_id(self, value):
+        if not Conversation.objects.filter(pk=value).exists():
+            raise NotFound('Conversation not found.')
+        return value
+
+
+class AttachmentMetadataSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    file_type = serializers.CharField()
+    file_size = serializers.IntegerField()
+    url = serializers.CharField()
+    filename = serializers.CharField()
+
+
+class UploadResponseSerializer(serializers.Serializer):
+    conversation_id = serializers.UUIDField()
+    message_id = serializers.IntegerField()
+    attachment = AttachmentMetadataSerializer()
