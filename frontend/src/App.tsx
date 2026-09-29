@@ -15,6 +15,11 @@ type Message = {
   diagnosis?: DiagnosisResponse
 }
 
+type PendingUpload = {
+  file: File
+  previewUrl: string
+}
+
 const statusLabels: Record<ChatStatus, string> = {
   needs_information: 'More detail needed',
   ambiguous: 'Needs clarification',
@@ -41,6 +46,7 @@ function App() {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
   const [error, setError] = useState<string>()
+  const [pendingUpload, setPendingUpload] = useState<PendingUpload>()
   const [bookingDiagnosis, setBookingDiagnosis] = useState<DiagnosisResponse>()
   const [booking, setBooking] = useState<BookingResponse>()
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -109,13 +115,18 @@ function App() {
     }
     const validationError = validateMediaFile(file)
     if (validationError) {
+      console.error('Media upload validation failed', { fileName: file.name, fileType: file.type, validationError })
       setError(validationError)
       return
     }
 
+    const previewUrl = URL.createObjectURL(file)
+    setPendingUpload({ file, previewUrl })
     setIsUploading(true)
     try {
       const response = await uploadMedia({ conversation_id: conversationId, file })
+      URL.revokeObjectURL(previewUrl)
+      setPendingUpload(undefined)
       setMessages((current) => [...current, {
         id: Date.now(),
         role: 'user',
@@ -123,6 +134,12 @@ function App() {
         attachment: response.attachment,
       }])
     } catch (uploadError) {
+      console.error('Media upload failed', {
+        conversationId,
+        fileName: file.name,
+        fileType: file.type,
+        uploadError,
+      })
       setError(uploadError instanceof Error ? uploadError.message : 'The media upload failed. Please try again.')
     } finally {
       setIsUploading(false)
@@ -158,6 +175,7 @@ function App() {
           </header>
 
           <div className="flex-1 space-y-5 overflow-y-auto px-5 py-6 sm:px-8 sm:py-8" aria-live="polite">
+            {pendingUpload && <PendingUploadPreview upload={pendingUpload} />}
             {messages.map((message) => (
               <div key={message.id} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 <div className="flex max-w-[90%] flex-col gap-3 sm:max-w-[75%]">
@@ -196,6 +214,14 @@ function App() {
       </div>
     </main>
   )
+}
+
+function PendingUploadPreview({ upload }: { upload: PendingUpload }) {
+  if (!upload.file.type.startsWith('image/')) {
+    return <div className="flex justify-end"><div className="max-w-[90%] rounded-2xl rounded-br-md border border-[#e9a44b] bg-[#fff8ed] px-4 py-3 text-sm text-[#60431d]">Preparing {upload.file.name} for upload...</div></div>
+  }
+
+  return <div className="flex justify-end"><div className="max-w-[90%] rounded-2xl rounded-br-md border border-[#e9a44b] bg-[#fff8ed] px-3 py-3"><img src={upload.previewUrl} alt={`Preview of ${upload.file.name}`} className="max-h-56 max-w-full rounded-xl object-contain" /><p className="mt-2 text-xs font-semibold text-[#60431d]">Preparing {upload.file.name} for upload...</p></div></div>
 }
 
 function AttachmentPreview({ attachment }: { attachment: AttachmentMetadata }) {
