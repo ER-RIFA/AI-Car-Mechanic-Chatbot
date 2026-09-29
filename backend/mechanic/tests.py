@@ -349,3 +349,97 @@ class GeminiFallbackTests(TestCase):
 
 		self.assertEqual(result.data['status'], 'unsupported')
 		self.assertIn('vehicle symptoms', result.data['reply'])
+
+
+class DiagnosisAPITests(TestCase):
+	def setUp(self):
+		self.client = APIClient()
+		self.url = '/api/diagnosis/'
+
+	def diagnose(self, conversation_id):
+		return self.client.post(self.url, {'conversation_id': str(conversation_id)}, format='json')
+
+	def test_missing_conversation_id(self):
+		response = self.client.post(self.url, {}, format='json')
+
+		self.assertEqual(response.status_code, 400)
+		self.assertEqual(response.data['error']['code'], 'VALIDATION_ERROR')
+
+	def test_nonexistent_conversation(self):
+		response = self.diagnose(uuid.uuid4())
+
+		self.assertEqual(response.status_code, 404)
+		self.assertEqual(response.data['error']['code'], 'CONVERSATION_NOT_FOUND')
+
+	def test_needs_information_does_not_create_diagnosis(self):
+		chat_response = self.client.post('/api/chat/', {'message': "My car won't start"}, format='json')
+
+		response = self.diagnose(chat_response.data['conversation_id'])
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.data['status'], 'needs_information')
+		self.assertIsNone(response.data['diagnosis_id'])
+		self.assertEqual(Diagnosis.objects.count(), 0)
+
+	def test_ambiguous_does_not_create_diagnosis(self):
+		chat_response = self.client.post(
+			'/api/chat/',
+			{'message': 'The steering wheel vibrates while braking'},
+			format='json',
+		)
+
+		response = self.diagnose(chat_response.data['conversation_id'])
+
+		self.assertEqual(response.data['status'], 'ambiguous')
+		self.assertIsNone(response.data['diagnosis_id'])
+		self.assertEqual(Diagnosis.objects.count(), 0)
+
+	def test_unsupported_does_not_create_diagnosis(self):
+		chat_response = self.client.post('/api/chat/', {'message': 'What is the weather today?'}, format='json')
+
+		response = self.diagnose(chat_response.data['conversation_id'])
+
+		self.assertEqual(response.data['status'], 'unsupported')
+		self.assertIsNone(response.data['diagnosis_id'])
+		self.assertEqual(Diagnosis.objects.count(), 0)
+
+	def test_final_rule_diagnosis_is_created_and_reused(self):
+		chat_response = self.client.post(
+			'/api/chat/',
+			{
+				'message': 'My car will not start, it does not crank, the dashboard lights are on, '
+				' there is no clicking, and I have a weak battery.',
+			},
+			format='json',
+		)
+		conversation_id = chat_response.data['conversation_id']
+
+		first_response = self.diagnose(conversation_id)
+		second_response = self.diagnose(conversation_id)
+
+		self.assertEqual(first_response.status_code, 200)
+		self.assertEqual(first_response.data['status'], 'matched')
+		self.assertEqual(first_response.data['source'], Diagnosis.Source.RULE)
+		self.assertEqual(first_response.data['diagnosis_id'], second_response.data['diagnosis_id'])
+		self.assertEqual(Diagnosis.objects.count(), 1)
+
+	def test_existing_gemini_diagnosis_preserves_source(self):
+		conversation = Conversation.objects.create(session_id=str(uuid.uuid4()))
+		diagnosis = Diagnosis.objects.create(
+			conversation=conversation,
+			symptoms=['gemini_fallback'],
+			result=json.dumps({
+				'status': 'matched',
+				'diagnosis': 'Transmission or clutch problem',
+				'recommended_service': 'Transmission inspection',
+				'safety_guidance': 'Avoid driving if gear engagement is unsafe.',
+			}),
+			recommended_service='Transmission inspection',
+			source=Diagnosis.Source.GEMINI,
+		)
+
+		response = self.diagnose(conversation.id)
+
+		self.assertEqual(response.data['diagnosis_id'], diagnosis.id)
+		self.assertEqual(response.data['source'], Diagnosis.Source.GEMINI)
+		self.assertEqual(response.data['diagnosis'], 'Transmission or clutch problem')

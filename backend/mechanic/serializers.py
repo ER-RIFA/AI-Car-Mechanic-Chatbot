@@ -55,3 +55,24 @@ class UploadResponseSerializer(serializers.Serializer):
     conversation_id = serializers.UUIDField()
     message_id = serializers.IntegerField()
     attachment = AttachmentMetadataSerializer()
+
+
+class DiagnosisRequestSerializer(serializers.Serializer):
+    conversation_id = serializers.UUIDField(required=True)
+
+    def validate_conversation_id(self, value):
+        if not Conversation.objects.filter(pk=value).exists():
+            raise NotFound('Conversation not found.')
+        return value
+
+
+class DiagnosisResponseSerializer(serializers.Serializer):
+    conversation_id = serializers.UUIDField()
+    diagnosis_id = serializers.IntegerField(allow_null=True)
+    status = serializers.CharField()
+    diagnosis = serializers.CharField(allow_null=True)
+    result = serializers.JSONField(allow_null=True)
+    recommended_service = serializers.CharField(allow_null=True)
+    safety_guidance = serializers.CharField(allow_null=True)
+    source = serializers.CharField(allow_null=True)
+    message = serializers.CharField(allow_null=True)

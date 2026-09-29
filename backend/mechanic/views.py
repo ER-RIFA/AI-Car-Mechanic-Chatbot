@@ -6,10 +6,13 @@ from rest_framework.views import APIView
 from .serializers import (
 	ChatRequestSerializer,
 	ChatResponseSerializer,
+	DiagnosisRequestSerializer,
+	DiagnosisResponseSerializer,
 	UploadRequestSerializer,
 	UploadResponseSerializer,
 )
 from .services.chat_service import ChatService
+from .services.diagnosis_service import DiagnosisService
 from .services.media_service import MediaUploadError, MediaUploadService
 
 
@@ -59,6 +62,31 @@ class ChatAPIView(APIView):
 		response_serializer = ChatResponseSerializer(result.data)
 		response_status = status.HTTP_201_CREATED if result.created else status.HTTP_200_OK
 		return Response(response_serializer.data, status=response_status)
+
+
+class DiagnosisAPIView(APIView):
+	def post(self, request):
+		serializer = DiagnosisRequestSerializer(data=request.data)
+		try:
+			serializer.is_valid(raise_exception=True)
+		except NotFound as exc:
+			return _error_response(
+				'CONVERSATION_NOT_FOUND',
+				str(exc.detail),
+				http_status=status.HTTP_404_NOT_FOUND,
+			)
+		except Exception:
+			if serializer.errors:
+				fields = {
+					field: [str(error) for error in errors]
+					for field, errors in serializer.errors.items()
+				}
+				message = next(iter(fields.values()))[0]
+				return _error_response('VALIDATION_ERROR', message, fields)
+			raise
+
+		result = DiagnosisService().diagnose(serializer.validated_data['conversation_id'])
+		return Response(DiagnosisResponseSerializer(result.data).data)
 
 
 class UploadAPIView(APIView):

@@ -19,11 +19,12 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import path
 
-from mechanic.views import ChatAPIView, UploadAPIView
+from mechanic.views import ChatAPIView, DiagnosisAPIView, UploadAPIView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/chat/', ChatAPIView.as_view(), name='chat'),
+    path('api/diagnosis/', DiagnosisAPIView.as_view(), name='diagnosis'),
     path('api/upload/', UploadAPIView.as_view(), name='upload'),
 ]
 

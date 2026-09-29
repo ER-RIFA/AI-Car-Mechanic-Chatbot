@@ -23,6 +23,24 @@ export interface ChatResponse {
   next_follow_up_question: string | null
 }
 
+export type DiagnosisSource = 'rule' | 'gemini' | 'hybrid'
+
+export interface DiagnosisRequest {
+  conversation_id: string
+}
+
+export interface DiagnosisResponse {
+  conversation_id: string
+  diagnosis_id: number | null
+  status: ChatStatus
+  diagnosis: string | null
+  result: Record<string, unknown> | null
+  recommended_service: string | null
+  safety_guidance: string | null
+  source: DiagnosisSource | null
+  message: string | null
+}
+
 export interface ChatErrorBody {
   error?: {
     code?: string
