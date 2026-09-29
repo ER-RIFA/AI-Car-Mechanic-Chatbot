@@ -27,8 +27,10 @@ class GeminiService:
     _AUTOMOTIVE_TERMS = (
         'car', 'vehicle', 'truck', 'engine', 'motor', 'brake', 'tire', 'tyre',
         'wheel', 'steering', 'battery', 'oil', 'coolant', 'radiator', 'transmission',
-        'gear', 'clutch', 'exhaust', 'engine light', 'dashboard', 'hood', 'bonnet',
-        'ac', 'air conditioning', 'alternator', 'starter', 'fuel',
+        'gearbox', 'gear shifting', 'shifting', 'slipping', 'drivetrain', 'differential',
+        'suspension', 'gear', 'clutch', 'exhaust', 'catalytic converter', 'engine light',
+        'dashboard', 'hood', 'bonnet', 'ac', 'air conditioning', 'alternator',
+        'starter motor', 'starter', 'spark plug', 'fuel pump', 'fuel', 'wheel alignment',
     )
 
     def __init__(self, client: Any | None = None) -> None:

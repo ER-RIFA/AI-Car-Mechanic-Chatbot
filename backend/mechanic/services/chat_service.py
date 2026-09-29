@@ -17,6 +17,12 @@ UNSUPPORTED_REPLY = (
     "I can help with vehicle symptoms, maintenance, repairs, and service bookings. "
     "I can't help with that topic."
 )
+AUTOMOTIVE_FALLBACK_REPLY = (
+    "I can help with vehicle symptoms, but I can't determine the cause of this issue "
+    "right now. Automotive symptoms can have several causes. Please share when it "
+    "happens, whether the RPM rises without acceleration, whether shifting is delayed "
+    "or harsh, and whether any warning lights are on."
+)
 AMBIGUOUS_REPLY = (
     "I found more than one possible vehicle issue. Could you provide more specific "
     "details about when the symptom happens and what you notice?"
@@ -55,10 +61,12 @@ class ChatService:
             content=message,
         )
         engine_result = self.engine.match(message, context)
-        gemini_result = self._maybe_use_gemini(message, context, engine_result)
+        gemini_result, automotive_fallback = self._maybe_use_gemini(message, context, engine_result)
         response = (
             self._build_gemini_response(conversation, gemini_result)
             if gemini_result
+            else self._build_automotive_fallback_response(conversation)
+            if automotive_fallback
             else self._build_response(conversation, engine_result)
         )
 
@@ -83,7 +91,7 @@ class ChatService:
         else:
             should_use = False
         if not should_use:
-            return None
+            return None, False
 
         try:
             gemini_result = self.gemini_service.diagnose(message, context)
@@ -91,10 +99,10 @@ class ChatService:
                 engine_result.status == MatchStatus.AMBIGUOUS
                 and gemini_result.status == MatchStatus.MATCHED.value
             ):
-                return None
-            return gemini_result
+                return None, False
+            return gemini_result, False
         except GeminiServiceError:
-            return None
+            return None, engine_result.status == MatchStatus.UNSUPPORTED and should_use
 
     def _get_or_create_conversation(
         self,
@@ -105,19 +113,31 @@ class ChatService:
         return Conversation.objects.create(session_id=str(uuid.uuid4())), True
 
     def _build_context(self, conversation: Conversation) -> dict[str, Any]:
-        previous_messages = list(
+        user_messages = list(
             conversation.messages.filter(role=Message.Role.USER)
-            .order_by('-created_at')
-            .values_list('content', flat=True)[:6]
+            .order_by('created_at')
+            .values_list('content', flat=True)
         )
-        previous_messages.reverse()
-        if not previous_messages:
+        if not user_messages:
             return {}
 
-        prior_result = self.engine.match(' '.join(previous_messages))
-        context: dict[str, Any] = {'previous_messages': previous_messages}
-        if prior_result.matched_rule:
-            context['matched_rule'] = prior_result.matched_rule.rule_id
+        context: dict[str, Any] = {
+            'previous_messages': [],
+            'follow_up_answers': {},
+        }
+        for user_message in user_messages:
+            result = self.engine.match(user_message, context)
+            context['previous_messages'] = [*context['previous_messages'], user_message][-6:]
+            if result.matched_rule:
+                context['matched_rule'] = result.matched_rule.rule_id
+            if result.matched_rule and result.missing_information:
+                key = result.missing_information[0]
+                context['pending_follow_up'] = {
+                    'rule_id': result.matched_rule.rule_id,
+                    'key': key,
+                }
+            else:
+                context.pop('pending_follow_up', None)
         return context
 
     def _build_response(self, conversation: Conversation, engine_result: Any) -> dict[str, Any]:
@@ -156,6 +176,23 @@ class ChatService:
             ],
             'missing_information': list(engine_result.missing_information),
             'next_follow_up_question': engine_result.next_follow_up_question,
+        }
+
+    def _build_automotive_fallback_response(self, conversation: Conversation) -> dict[str, Any]:
+        return {
+            'conversation_id': str(conversation.id),
+            'status': MatchStatus.NEEDS_INFORMATION.value,
+            'reply': AUTOMOTIVE_FALLBACK_REPLY,
+            'diagnosis': None,
+            'possible_diagnoses': [],
+            'recommended_service': None,
+            'safety_guidance': None,
+            'matched_rule': None,
+            'matched_rules': [],
+            'missing_information': ['symptom_timing', 'shifting_behavior', 'warning_lights'],
+            'next_follow_up_question': (
+                'When does it happen, does the RPM rise without acceleration, and are any warning lights on?'
+            ),
         }
 
     def _build_gemini_response(

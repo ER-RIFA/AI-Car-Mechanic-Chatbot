@@ -57,6 +57,123 @@ class ChatAPITests(TestCase):
 		)
 		self.assertIsNone(response.data['diagnosis'])
 
+	def test_brake_follow_up_answer_does_not_repeat_question(self):
+		first_response = self.post_message('My brakes squeal')
+		conversation_id = first_response.data['conversation_id']
+
+		self.assertEqual(
+			first_response.data['next_follow_up_question'],
+			'Has braking performance changed or does the pedal feel soft?',
+		)
+		response = self.post_message('breaking is a bit hard', conversation_id)
+
+		self.assertNotEqual(response.data['reply'], first_response.data['reply'])
+		self.assertNotEqual(
+			response.data['next_follow_up_question'],
+			'Has braking performance changed or does the pedal feel soft?',
+		)
+
+	def test_brake_follow_up_negative_answer_does_not_repeat_question(self):
+		first_response = self.post_message('My brakes squeal')
+		conversation_id = first_response.data['conversation_id']
+
+		response = self.post_message('no', conversation_id)
+
+		self.assertNotEqual(
+			response.data['next_follow_up_question'],
+			'Has braking performance changed or does the pedal feel soft?',
+		)
+
+	def test_brake_follow_up_no_after_clarification_does_not_repeat_question(self):
+		first_response = self.post_message(
+			'My brakes squeal and the steering wheel shakes when braking'
+		)
+		conversation_id = first_response.data['conversation_id']
+
+		second_response = self.post_message('steering wheel shaking', conversation_id)
+		self.assertEqual(
+			second_response.data['next_follow_up_question'],
+			'Has braking performance changed or does the pedal feel soft?',
+		)
+
+		third_response = self.post_message('no', conversation_id)
+		self.assertNotEqual(
+			third_response.data['next_follow_up_question'],
+			'Has braking performance changed or does the pedal feel soft?',
+		)
+
+	def test_brake_follow_up_fields_never_repeat_across_multiple_answers(self):
+		first_response = self.post_message(
+			'My brakes squeal and the steering wheel shakes when braking'
+		)
+		conversation_id = first_response.data['conversation_id']
+		responses = [
+			self.post_message('steering wheel shaking', conversation_id),
+			self.post_message('no', conversation_id),
+			self.post_message('no', conversation_id),
+		]
+
+		questions = []
+		for response in responses:
+			question = response.data['next_follow_up_question']
+			if question:
+				self.assertNotIn(question, questions)
+				questions.append(question)
+		self.assertNotIn(
+				'Has braking performance changed or does the pedal feel soft?',
+				questions[1:],
+		)
+
+	def test_brake_follow_up_positive_flow_reaches_diagnosis(self):
+		first_response = self.post_message('My brakes squeal')
+		conversation_id = first_response.data['conversation_id']
+
+		second_response = self.post_message('the brakes feel harder', conversation_id)
+		self.assertNotEqual(second_response.data['status'], 'unsupported')
+		third_response = self.post_message('no', conversation_id)
+
+		self.assertEqual(third_response.data['status'], 'matched')
+		self.assertIsNotNone(third_response.data['diagnosis'])
+
+	def test_api_follow_up_state_persists_and_advances_semantic_fields(self):
+		first_response = self.post_message(
+			'My brakes squeal and the steering wheel shakes when braking'
+		)
+		conversation_id = first_response.data['conversation_id']
+		self.post_message('steering wheel shaking', conversation_id)
+		conversation = Conversation.objects.get(pk=conversation_id)
+		service = ChatService()
+
+		before_answer = service._build_context(conversation)
+		self.assertEqual(before_answer['pending_follow_up']['key'], 'braking_effect')
+		third_response = self.post_message('yes', conversation_id)
+		after_answer = service._build_context(conversation)
+
+		self.assertEqual(third_response.data['status'], 'needs_information')
+		self.assertIn('braking_effect', after_answer['follow_up_answers'])
+		self.assertNotEqual(after_answer['pending_follow_up']['key'], 'braking_effect')
+		self.assertNotEqual(
+			third_response.data['next_follow_up_question'],
+			'Has braking performance changed or does the pedal feel soft?',
+		)
+
+	def test_api_pending_brake_answers_with_details_advance(self):
+		for answer in ('yes changes', 'not soft'):
+			with self.subTest(answer=answer):
+				first_response = self.post_message('My brakes squeal')
+				conversation_id = first_response.data['conversation_id']
+				self.post_message('steering wheel shaking', conversation_id)
+				response = self.post_message(answer, conversation_id)
+
+				self.assertNotEqual(
+					response.data['next_follow_up_question'],
+					'Has braking performance changed or does the pedal feel soft?',
+				)
+				context = ChatService()._build_context(
+					Conversation.objects.get(pk=conversation_id)
+				)
+				self.assertIn('braking_effect', context['follow_up_answers'])
+
 	def test_diagnosis_after_sufficient_information(self):
 		response = self.post_message(
 			'My car will not start, it does not crank, the dashboard lights are on, '
@@ -241,7 +358,19 @@ class GeminiFallbackTests(TestCase):
 		)
 
 		self.assertEqual(result.data['status'], 'unsupported')
+		self.assertIn("I can't help with that topic", result.data['reply'])
 		gemini.should_handle_unsupported.assert_called_once()
+		gemini.diagnose.assert_not_called()
+
+	def test_joke_query_remains_outside_scope(self):
+		gemini = self.make_gemini()
+		result = ChatService(gemini_service=gemini).process_message(
+			'Tell me a joke',
+			self.conversation.id,
+		)
+
+		self.assertEqual(result.data['status'], 'unsupported')
+		self.assertIn("I can't help with that topic", result.data['reply'])
 		gemini.diagnose.assert_not_called()
 
 	def test_automotive_unsupported_query_uses_gemini_fallback(self):
@@ -286,23 +415,23 @@ class GeminiFallbackTests(TestCase):
 		self.assertEqual(result.data['recommended_service'], 'Transmission inspection')
 		client.models.generate_content.assert_called_once()
 
-	def test_ambiguous_automotive_query_uses_gemini(self):
+	def test_unsupported_automotive_query_uses_gemini_needs_information(self):
 		gemini_result = GeminiDiagnosticResult(
 			'needs_information',
-			'Is the vibration present only during braking or also at highway speed?',
+			'When does the transmission slip, and do engine RPMs rise without acceleration?',
 			(),
 			None,
-			'If braking is affected, avoid driving until inspected.',
-			'When does the vibration occur?',
+			'Avoid driving if the vehicle cannot shift safely.',
+			'When does the slipping occur?',
 		)
-		gemini = self.make_gemini(gemini_result)
+		gemini = self.make_gemini(gemini_result, automotive=True)
 		result = ChatService(gemini_service=gemini).process_message(
-			'The steering wheel vibrates while braking',
+			'My transmission is slipping',
 			self.conversation.id,
 		)
 
 		self.assertEqual(result.data['status'], 'needs_information')
-		self.assertEqual(result.data['next_follow_up_question'], 'When does the vibration occur?')
+		self.assertEqual(result.data['next_follow_up_question'], 'When does the slipping occur?')
 		gemini.diagnose.assert_called_once()
 
 	@patch('mechanic.services.chat_service.GeminiService')
@@ -337,8 +466,9 @@ class GeminiFallbackTests(TestCase):
 			self.conversation.id,
 		)
 
-		self.assertEqual(result.data['status'], 'unsupported')
-		self.assertIn('vehicle symptoms', result.data['reply'])
+		self.assertEqual(result.data['status'], 'needs_information')
+		self.assertIn('Automotive symptoms can have several causes', result.data['reply'])
+		self.assertNotIn("I can't help with that topic", result.data['reply'])
 
 	def test_missing_gemini_configuration_is_graceful(self):
 		with self.settings(GEMINI_API_KEY=''):
@@ -347,8 +477,32 @@ class GeminiFallbackTests(TestCase):
 				self.conversation.id,
 			)
 
-		self.assertEqual(result.data['status'], 'unsupported')
-		self.assertIn('vehicle symptoms', result.data['reply'])
+		self.assertEqual(result.data['status'], 'needs_information')
+		self.assertIn('Automotive symptoms can have several causes', result.data['reply'])
+		self.assertNotIn("I can't help with that topic", result.data['reply'])
+
+	def test_transmission_slipping_uses_automotive_fallback_scope(self):
+		service = GeminiService()
+		self.assertTrue(service.should_handle_unsupported('My transmission is slipping'))
+
+		with self.settings(GEMINI_API_KEY=''):
+			result = ChatService(gemini_service=service).process_message(
+				'My transmission is slipping',
+				self.conversation.id,
+			)
+
+		self.assertEqual(result.data['status'], 'needs_information')
+		self.assertIn('Automotive symptoms can have several causes', result.data['reply'])
+		self.assertNotIn("I can't help with that topic", result.data['reply'])
+
+	def test_gearbox_noise_uses_automotive_fallback_scope(self):
+		service = GeminiService()
+		self.assertTrue(service.should_handle_unsupported('My gearbox is making a noise'))
+
+	def test_unrelated_fallback_queries_remain_outside_automotive_scope(self):
+		service = GeminiService()
+		self.assertFalse(service.should_handle_unsupported('What is the weather today?'))
+		self.assertFalse(service.should_handle_unsupported('Tell me a joke'))
 
 
 class DiagnosisAPITests(TestCase):

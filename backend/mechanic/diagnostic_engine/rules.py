@@ -3,7 +3,7 @@
 Rules describe automotive knowledge; matching behavior lives in matcher.py.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,8 @@ class DiagnosticRule:
     possible_diagnoses: tuple[str, ...]
     recommended_service: str
     safety_guidance: str
+    follow_up_answer_signals: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    yes_no_follow_up_keys: tuple[str, ...] = ()
 
 
 DIAGNOSTIC_RULES = (
@@ -59,6 +61,15 @@ DIAGNOSTIC_RULES = (
         ("Worn brake pads or wear indicator", "Brake rotor damage", "Debris or sticking brake component"),
         "Brake inspection, including pads, rotors, and calipers",
         "If grinding is severe, the pedal is soft, or braking performance is reduced, do not drive; arrange professional assistance.",
+        {"braking_effect": (
+            "brakes is a bit hard", "brakes feel hard", "brakes feel harder", "brakes feels harder",
+            "brakes performance has changed", "brakes feels different",
+            "breaking is a bit hard", "breaking feels hard", "breaking feels harder",
+            "pedal feels hard", "pedal is hard", "pedal is harder", "pedal feels harder",
+            "pedal feels soft", "brakes feels normal", "brakes feel normal",
+            "brakes is normal", "braking feels normal",
+        )},
+        ("noise_type", "braking_effect", "recent_brake_work"),
     ),
     DiagnosticRule(
         "check_engine_light", "check-engine light",
