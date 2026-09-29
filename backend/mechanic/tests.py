@@ -1,6 +1,8 @@
+import json
 import shutil
 import tempfile
 import uuid
+from unittest.mock import MagicMock, patch
 
 from django.core.files.storage import default_storage
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -10,6 +12,8 @@ from django.utils.functional import empty
 from rest_framework.test import APIClient
 
 from .models import Conversation, Diagnosis, MediaAttachment, Message
+from .services.chat_service import ChatService
+from .services.gemini_service import GeminiDiagnosticResult, GeminiService, GeminiServiceError
 
 
 class ChatAPITests(TestCase):
@@ -204,3 +208,144 @@ class MediaUploadAPITests(TestCase):
 		self.assertTrue(response.data['attachment']['filename'].endswith('.png'))
 		self.assertEqual(MediaAttachment.objects.count(), 1)
 		self.assertEqual(Message.objects.count(), 1)
+
+
+class GeminiFallbackTests(TestCase):
+	def setUp(self):
+		self.conversation = Conversation.objects.create(session_id=str(uuid.uuid4()))
+
+	def make_gemini(self, result=None, error=None, automotive=False):
+		gemini = MagicMock()
+		gemini.should_handle_unsupported.return_value = automotive
+		if error:
+			gemini.diagnose.side_effect = error
+		else:
+			gemini.diagnose.return_value = result
+		return gemini
+
+	def test_rule_based_query_does_not_call_gemini(self):
+		gemini = self.make_gemini()
+		result = ChatService(gemini_service=gemini).process_message(
+			"My car won't start",
+			self.conversation.id,
+		)
+
+		self.assertEqual(result.data['status'], 'needs_information')
+		gemini.diagnose.assert_not_called()
+
+	def test_unsupported_non_automotive_query_does_not_call_gemini(self):
+		gemini = self.make_gemini()
+		result = ChatService(gemini_service=gemini).process_message(
+			'What is the weather today?',
+			self.conversation.id,
+		)
+
+		self.assertEqual(result.data['status'], 'unsupported')
+		gemini.should_handle_unsupported.assert_called_once()
+		gemini.diagnose.assert_not_called()
+
+	def test_automotive_unsupported_query_uses_gemini_fallback(self):
+		gemini_result = GeminiDiagnosticResult(
+			'matched',
+			'The transmission may have a slipping clutch or low fluid.',
+			('Transmission or clutch problem',),
+			'Transmission inspection and fluid check',
+			'Avoid continued driving if the vehicle cannot select gears safely.',
+			None,
+		)
+		gemini = self.make_gemini(gemini_result, automotive=True)
+		result = ChatService(gemini_service=gemini).process_message(
+			'My transmission is slipping',
+			self.conversation.id,
+		)
+
+		self.assertEqual(result.data['status'], 'matched')
+		self.assertEqual(result.data['diagnosis'], 'Transmission or clutch problem')
+		self.assertEqual(result.data['recommended_service'], 'Transmission inspection and fluid check')
+		gemini.diagnose.assert_called_once()
+		self.assertEqual(self.conversation.diagnoses.get().source, Diagnosis.Source.GEMINI)
+
+	def test_mocked_structured_gemini_response_is_converted(self):
+		client = MagicMock()
+		client.models.generate_content.return_value.text = json.dumps({
+			'status': 'matched',
+			'reply': 'The transmission may have a slipping clutch.',
+			'possible_diagnoses': ['Transmission or clutch problem'],
+			'recommended_service': 'Transmission inspection',
+			'safety_guidance': 'Avoid driving if gear engagement is unsafe.',
+			'follow_up_question': None,
+		})
+		with self.settings(GEMINI_API_KEY='test-key'):
+			result = ChatService(gemini_service=GeminiService(client=client)).process_message(
+				'My transmission is slipping',
+				self.conversation.id,
+			)
+
+		self.assertEqual(result.data['status'], 'matched')
+		self.assertEqual(result.data['diagnosis'], 'Transmission or clutch problem')
+		self.assertEqual(result.data['recommended_service'], 'Transmission inspection')
+		client.models.generate_content.assert_called_once()
+
+	def test_ambiguous_automotive_query_uses_gemini(self):
+		gemini_result = GeminiDiagnosticResult(
+			'needs_information',
+			'Is the vibration present only during braking or also at highway speed?',
+			(),
+			None,
+			'If braking is affected, avoid driving until inspected.',
+			'When does the vibration occur?',
+		)
+		gemini = self.make_gemini(gemini_result)
+		result = ChatService(gemini_service=gemini).process_message(
+			'The steering wheel vibrates while braking',
+			self.conversation.id,
+		)
+
+		self.assertEqual(result.data['status'], 'needs_information')
+		self.assertEqual(result.data['next_follow_up_question'], 'When does the vibration occur?')
+		gemini.diagnose.assert_called_once()
+
+	@patch('mechanic.services.chat_service.GeminiService')
+	def test_ambiguous_gemini_match_does_not_create_definitive_diagnosis(self, gemini_class):
+		gemini = gemini_class.return_value
+		gemini.diagnose.return_value = GeminiDiagnosticResult(
+			'matched',
+			'Possible warped rotor.',
+			('Warped brake rotor',),
+			'Brake inspection',
+			'Avoid driving if braking is reduced.',
+			None,
+		)
+
+		response = APIClient().post(
+			'/api/chat/',
+			{'message': 'The steering wheel vibrates while braking'},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, 201)
+		self.assertEqual(response.data['status'], 'ambiguous')
+		self.assertIsNone(response.data['diagnosis'])
+		self.assertGreaterEqual(len(response.data['matched_rules']), 2)
+		self.assertEqual(Diagnosis.objects.count(), 0)
+		gemini.diagnose.assert_called_once()
+
+	def test_gemini_failure_falls_back_to_deterministic_response(self):
+		gemini = self.make_gemini(error=GeminiServiceError('provider unavailable'), automotive=True)
+		result = ChatService(gemini_service=gemini).process_message(
+			'My transmission is slipping',
+			self.conversation.id,
+		)
+
+		self.assertEqual(result.data['status'], 'unsupported')
+		self.assertIn('vehicle symptoms', result.data['reply'])
+
+	def test_missing_gemini_configuration_is_graceful(self):
+		with self.settings(GEMINI_API_KEY=''):
+			result = ChatService(gemini_service=GeminiService()).process_message(
+				'My transmission is slipping',
+				self.conversation.id,
+			)
+
+		self.assertEqual(result.data['status'], 'unsupported')
+		self.assertIn('vehicle symptoms', result.data['reply'])

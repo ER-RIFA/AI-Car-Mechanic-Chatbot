@@ -10,6 +10,7 @@ from mechanic.diagnostic_engine.normalizer import normalize_text
 from mechanic.diagnostic_engine.rules import DiagnosticRule
 
 from ..models import Conversation, Diagnosis, Message
+from .gemini_service import GeminiDiagnosticResult, GeminiService, GeminiServiceError
 
 
 UNSUPPORTED_REPLY = (
@@ -31,8 +32,13 @@ class ChatServiceResult:
 class ChatService:
     """Coordinate conversation persistence and deterministic diagnosis."""
 
-    def __init__(self, engine: DiagnosticEngine | None = None) -> None:
+    def __init__(
+        self,
+        engine: DiagnosticEngine | None = None,
+        gemini_service: GeminiService | None = None,
+    ) -> None:
         self.engine = engine or DiagnosticEngine()
+        self.gemini_service = gemini_service or GeminiService()
 
     @transaction.atomic
     def process_message(
@@ -49,18 +55,46 @@ class ChatService:
             content=message,
         )
         engine_result = self.engine.match(message, context)
-        response = self._build_response(conversation, engine_result)
+        gemini_result = self._maybe_use_gemini(message, context, engine_result)
+        response = (
+            self._build_gemini_response(conversation, gemini_result)
+            if gemini_result
+            else self._build_response(conversation, engine_result)
+        )
 
         Message.objects.create(
             conversation=conversation,
             role=Message.Role.ASSISTANT,
             content=response['reply'],
         )
-        if engine_result.status == MatchStatus.MATCHED and engine_result.matched_rule:
+        if gemini_result and gemini_result.status == MatchStatus.MATCHED:
+            self._save_gemini_diagnosis(conversation, gemini_result, response)
+        elif engine_result.status == MatchStatus.MATCHED and engine_result.matched_rule:
             self._save_diagnosis(conversation, engine_result, response)
 
         conversation.save(update_fields=['updated_at'])
         return ChatServiceResult(response, created)
+
+    def _maybe_use_gemini(self, message, context, engine_result):
+        if engine_result.status == MatchStatus.AMBIGUOUS:
+            should_use = True
+        elif engine_result.status == MatchStatus.UNSUPPORTED:
+            should_use = self.gemini_service.should_handle_unsupported(message)
+        else:
+            should_use = False
+        if not should_use:
+            return None
+
+        try:
+            gemini_result = self.gemini_service.diagnose(message, context)
+            if (
+                engine_result.status == MatchStatus.AMBIGUOUS
+                and gemini_result.status == MatchStatus.MATCHED.value
+            ):
+                return None
+            return gemini_result
+        except GeminiServiceError:
+            return None
 
     def _get_or_create_conversation(
         self,
@@ -124,6 +158,34 @@ class ChatService:
             'next_follow_up_question': engine_result.next_follow_up_question,
         }
 
+    def _build_gemini_response(
+        self,
+        conversation: Conversation,
+        gemini_result: GeminiDiagnosticResult,
+    ) -> dict[str, Any]:
+        diagnosis = (
+            '; '.join(gemini_result.possible_diagnoses)
+            if gemini_result.status == MatchStatus.MATCHED.value
+            else None
+        )
+        return {
+            'conversation_id': str(conversation.id),
+            'status': gemini_result.status,
+            'reply': gemini_result.reply,
+            'diagnosis': diagnosis,
+            'possible_diagnoses': list(gemini_result.possible_diagnoses),
+            'recommended_service': gemini_result.recommended_service,
+            'safety_guidance': gemini_result.safety_guidance,
+            'matched_rule': None,
+            'matched_rules': [],
+            'missing_information': (
+                ['additional_information']
+                if gemini_result.status == MatchStatus.NEEDS_INFORMATION.value
+                else []
+            ),
+            'next_follow_up_question': gemini_result.follow_up_question,
+        }
+
     def _save_diagnosis(self, conversation: Conversation, engine_result: Any, response: dict[str, Any]) -> None:
         rule = engine_result.matched_rule
         previous_user_messages = list(
@@ -135,6 +197,27 @@ class ChatService:
             'result': json.dumps(response, sort_keys=True),
             'recommended_service': engine_result.recommended_service or '',
             'source': Diagnosis.Source.RULE,
+        }
+        diagnosis = conversation.diagnoses.order_by('-created_at').first()
+        if diagnosis is None:
+            Diagnosis.objects.create(conversation=conversation, **diagnosis_data)
+        else:
+            for field, value in diagnosis_data.items():
+                setattr(diagnosis, field, value)
+            diagnosis.save(update_fields=[*diagnosis_data, 'created_at'])
+
+    def _save_gemini_diagnosis(
+        self,
+        conversation: Conversation,
+        gemini_result: GeminiDiagnosticResult,
+        response: dict[str, Any],
+    ) -> None:
+        diagnosis_data = {
+            'symptoms': ['gemini_fallback'],
+            'follow_up_answers': {},
+            'result': json.dumps(response, sort_keys=True),
+            'recommended_service': gemini_result.recommended_service or '',
+            'source': Diagnosis.Source.GEMINI,
         }
         diagnosis = conversation.diagnoses.order_by('-created_at').first()
         if diagnosis is None:
