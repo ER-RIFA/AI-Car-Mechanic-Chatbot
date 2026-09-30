@@ -57,6 +57,7 @@ class UploadResponseSerializer(serializers.Serializer):
     conversation_id = serializers.UUIDField()
     message_id = serializers.IntegerField()
     attachment = AttachmentMetadataSerializer()
+    assistant_response = ChatResponseSerializer()
 
 
 class DiagnosisRequestSerializer(serializers.Serializer):

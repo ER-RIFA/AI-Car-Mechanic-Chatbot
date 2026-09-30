@@ -90,4 +90,5 @@ export interface UploadResponse {
   conversation_id: string
   message_id: number
   attachment: AttachmentMetadata
+  assistant_response: ChatResponse
 }

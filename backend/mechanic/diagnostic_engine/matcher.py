@@ -13,6 +13,13 @@ from .semantics import RULE_INTENTS, SemanticEvidence, extract_semantics
 _NON_AUTOMOTIVE_CONTEXT = {
     "laptop", "phone", "computer", "washing machine", "refrigerator", "oven", "television",
 }
+_COMPONENT_FOLLOW_UP_RULE = "__component_follow_up__"
+_COMPONENT_FOLLOW_UP_KEY = "component_details"
+_FOLLOW_UP_CONTEXT_TERMS = {
+    "when", "while", "after", "before", "press", "pressed", "sound", "noise", "silent",
+    "click", "clicking", "come", "comes", "only", "both", "one", "left", "right",
+    "sometimes", "always", "intermittent", "intermittently", "completely", "not at all",
+}
 
 
 class MatchStatus(str, Enum):
@@ -95,9 +102,14 @@ class DiagnosticEngine:
                 return DiagnosticMatchResult(MatchStatus.UNSUPPORTED, None, (), (), (), None, (), None, None, None)
             if evidence.components or evidence.complaints:
                 component = evidence.interpretation.component
-                missing = ("complaint",) if component else ("component",)
+                answered_component_follow_up = context.get("_component_follow_up_answered")
+                missing = ("component_behavior",) if answered_component_follow_up else (
+                    ("complaint",) if component else ("component",)
+                )
                 question = (
-                    f"What is happening with the {component.replace('_', ' ')} system?"
+                    f"Does the {component.replace('_', ' ')} work intermittently, or is it completely inactive?"
+                    if component and answered_component_follow_up
+                    else f"What is happening with the {component.replace('_', ' ')} system?"
                     if component
                     else "Which vehicle component or system is affected?"
                 )
@@ -136,6 +148,28 @@ class DiagnosticEngine:
         """Interpret a pending answer before considering standalone symptoms."""
         normalized_message = normalize_text(message)
         pending = context.get("pending_follow_up")
+        if isinstance(pending, dict) and pending.get("rule_id") == _COMPONENT_FOLLOW_UP_RULE:
+            evidence = extract_semantics(message)
+            component = pending.get("component")
+            has_component_evidence = isinstance(component, str) and component in evidence.components
+            has_context_evidence = any(
+                term in normalized_message.split() or term in normalized_message
+                for term in _FOLLOW_UP_CONTEXT_TERMS
+            )
+            if has_component_evidence or evidence.complaints or has_context_evidence:
+                self._accumulate_answer(
+                    context,
+                    _COMPONENT_FOLLOW_UP_KEY,
+                    message,
+                )
+                context.setdefault("follow_up_facts", {}).update({
+                    "component": component,
+                    "details_provided": True,
+                })
+                context.pop("pending_follow_up", None)
+                context["_component_follow_up_answered"] = True
+                return True
+            return False
         rule_id = pending.get("rule_id") if isinstance(pending, dict) else context.get("matched_rule")
         key = pending.get("key") if isinstance(pending, dict) else None
         rule = next((item for item in self.rules if item.rule_id == rule_id), None)

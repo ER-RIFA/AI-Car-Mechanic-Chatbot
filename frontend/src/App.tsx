@@ -127,11 +127,25 @@ function App() {
       const response = await uploadMedia({ conversation_id: conversationId, file })
       URL.revokeObjectURL(previewUrl)
       setPendingUpload(undefined)
+      let diagnosis: DiagnosisResponse | undefined
+      if (response.assistant_response.status === 'matched') {
+        try {
+          diagnosis = await requestDiagnosis({ conversation_id: response.conversation_id })
+        } catch (diagnosisError) {
+          setError(diagnosisError instanceof Error ? diagnosisError.message : 'The diagnosis card could not be loaded.')
+        }
+      }
       setMessages((current) => [...current, {
         id: Date.now(),
         role: 'user',
         content: `Uploaded ${response.attachment.filename}`,
         attachment: response.attachment,
+      }, {
+        id: Date.now() + 1,
+        role: 'assistant',
+        content: response.assistant_response.reply,
+        status: response.assistant_response.status,
+        diagnosis,
       }])
     } catch (uploadError) {
       console.error('Media upload failed', {

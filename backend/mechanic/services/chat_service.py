@@ -1,4 +1,5 @@
 import json
+import mimetypes
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -10,7 +11,7 @@ from mechanic.diagnostic_engine.normalizer import normalize_text
 from mechanic.diagnostic_engine.rules import DiagnosticRule
 
 from ..models import Conversation, Diagnosis, Message
-from .gemini_service import GeminiDiagnosticResult, GeminiService, GeminiServiceError
+from .gemini_service import GeminiDiagnosticResult, GeminiFollowUpResult, GeminiService, GeminiServiceError
 
 
 UNSUPPORTED_REPLY = (
@@ -19,9 +20,11 @@ UNSUPPORTED_REPLY = (
 )
 AUTOMOTIVE_FALLBACK_REPLY = (
     "I can help with vehicle symptoms, but I can't determine the cause of this issue "
-    "right now. Automotive symptoms can have several causes. Please share when it "
-    "happens, whether the RPM rises without acceleration, whether shifting is delayed "
-    "or harsh, and whether any warning lights are on."
+    "right now. Automotive symptoms can have several causes."
+)
+MEDIA_DESCRIPTION_REPLY = (
+    'I received the {media_type} upload. Please describe what you are noticing with the vehicle '
+    'so I can help narrow down the next step.'
 )
 AMBIGUOUS_REPLY = (
     "I found more than one possible vehicle issue. Could you provide more specific "
@@ -61,11 +64,17 @@ class ChatService:
             content=message,
         )
         engine_result = self.engine.match(message, context)
+        follow_up_result = self._maybe_interpret_pending(message, context)
+        if follow_up_result and follow_up_result.answered:
+            key = context['pending_follow_up']['key']
+            context['follow_up_answers'][key] = follow_up_result.answer
+            context.setdefault('follow_up_facts', {}).update(follow_up_result.facts)
+            engine_result = self.engine.match('', context)
         gemini_result, automotive_fallback = self._maybe_use_gemini(message, context, engine_result)
         response = (
             self._build_gemini_response(conversation, gemini_result)
             if gemini_result
-            else self._build_automotive_fallback_response(conversation)
+            else self._build_automotive_fallback_response(conversation, engine_result, context)
             if automotive_fallback
             else self._build_response(conversation, engine_result)
         )
@@ -83,11 +92,107 @@ class ChatService:
         conversation.save(update_fields=['updated_at'])
         return ChatServiceResult(response, created)
 
+    def _maybe_interpret_pending(
+        self,
+        message: str,
+        context: dict[str, Any],
+    ) -> GeminiFollowUpResult | None:
+        pending = context.get('pending_follow_up')
+        if not isinstance(pending, dict):
+            return None
+        key = pending.get('key')
+        rule_id = pending.get('rule_id')
+        if not isinstance(key, str) or not isinstance(rule_id, str):
+            return None
+        if key in context.get('follow_up_answers', {}):
+            return None
+        rule = next((item for item in self.engine.rules if item.rule_id == rule_id), None)
+        if rule is None:
+            return None
+        try:
+            return self.gemini_service.interpret_follow_up(
+                message,
+                rule.follow_up_questions[key],
+                rule_id,
+                key,
+                context,
+            )
+        except GeminiServiceError:
+            return None
+
+    @transaction.atomic
+    def process_media_upload(self, conversation_id: uuid.UUID, attachment_id: int) -> ChatServiceResult:
+        conversation = Conversation.objects.get(pk=conversation_id)
+        attachment = conversation.media_attachments.select_related('message').get(pk=attachment_id)
+        context = self._build_context(conversation)
+        gemini_result = None
+
+        if attachment.file_type == Message.MessageType.IMAGE and self._should_analyze_image(conversation):
+            try:
+                mime_type = mimetypes.guess_type(attachment.file.name)[0] or 'image/*'
+                gemini_result = self.gemini_service.analyze_image(
+                    attachment.file.read(),
+                    mime_type,
+                    context,
+                )
+            except GeminiServiceError:
+                gemini_result = None
+
+        if gemini_result:
+            response = self._build_gemini_response(conversation, gemini_result)
+        else:
+            response = self._build_media_description_response(conversation, attachment.file_type)
+
+        Message.objects.create(
+            conversation=conversation,
+            role=Message.Role.ASSISTANT,
+            content=response['reply'],
+        )
+        if gemini_result and gemini_result.status == MatchStatus.MATCHED.value:
+            self._save_gemini_diagnosis(conversation, gemini_result, response)
+        conversation.save(update_fields=['updated_at'])
+        return ChatServiceResult(response, False)
+
+    def _should_analyze_image(self, conversation: Conversation) -> bool:
+        messages = conversation.messages.filter(
+            role=Message.Role.USER,
+            message_type=Message.MessageType.TEXT,
+        ).values_list('content', flat=True)
+        text = ' '.join(messages)
+        if not text.strip():
+            return False
+        result = self.engine.match(text)
+        return result.status != MatchStatus.UNSUPPORTED or self.gemini_service.should_handle_unsupported(text)
+
+    def _build_media_description_response(
+        self,
+        conversation: Conversation,
+        media_type: str,
+    ) -> dict[str, Any]:
+        label = 'image' if media_type == Message.MessageType.IMAGE else media_type
+        return {
+            'conversation_id': str(conversation.id),
+            'status': MatchStatus.NEEDS_INFORMATION.value,
+            'reply': MEDIA_DESCRIPTION_REPLY.format(media_type=label),
+            'diagnosis': None,
+            'possible_diagnoses': [],
+            'recommended_service': None,
+            'safety_guidance': None,
+            'matched_rule': None,
+            'matched_rules': [],
+            'missing_information': ['symptom_description'],
+            'next_follow_up_question': 'What vehicle symptom or sound should I look into?',
+        }
+
     def _maybe_use_gemini(self, message, context, engine_result):
+        if context.get('_component_follow_up_answered'):
+            return None, True
         if engine_result.status == MatchStatus.AMBIGUOUS:
             should_use = True
         elif engine_result.status == MatchStatus.UNSUPPORTED:
             should_use = self.gemini_service.should_handle_unsupported(message)
+        elif engine_result.status == MatchStatus.NEEDS_INFORMATION and engine_result.matched_rule is None:
+            should_use = bool(engine_result.components and engine_result.complaints) and self.gemini_service.should_handle_unsupported(message)
         else:
             should_use = False
         if not should_use:
@@ -102,7 +207,11 @@ class ChatService:
                 return None, False
             return gemini_result, False
         except GeminiServiceError:
-            return None, engine_result.status == MatchStatus.UNSUPPORTED and should_use
+            return None, (
+                engine_result.status == MatchStatus.UNSUPPORTED
+                or engine_result.status == MatchStatus.NEEDS_INFORMATION
+                and engine_result.matched_rule is None
+            ) and should_use
 
     def _get_or_create_conversation(
         self,
@@ -136,6 +245,20 @@ class ChatService:
                     'rule_id': result.matched_rule.rule_id,
                     'key': key,
                 }
+            elif result.components and result.complaints:
+                if context.pop('_component_follow_up_answered', False):
+                    context.pop('pending_follow_up', None)
+                else:
+                    component = result.components[0]
+                    context['pending_follow_up'] = {
+                        'rule_id': '__component_follow_up__',
+                        'key': 'component_details',
+                        'component': component,
+                        'question': (
+                            f'When does the {component.replace("_", " ")} problem happen, '
+                            'and what exactly do you notice?'
+                        ),
+                    }
             else:
                 context.pop('pending_follow_up', None)
         return context
@@ -156,6 +279,13 @@ class ChatService:
             diagnosis = '; '.join(engine_result.possible_diagnoses)
             recommended_service = engine_result.recommended_service
             reply = f'Based on the information provided, possible issue(s): {diagnosis}.'
+
+        if (
+            engine_result.matched_rule
+            and engine_result.matched_rule.rule_id == 'brake_failure'
+            and engine_result.safety_guidance
+        ):
+            reply = f'{engine_result.safety_guidance} {reply}'
 
         return {
             'conversation_id': str(conversation.id),
@@ -178,21 +308,30 @@ class ChatService:
             'next_follow_up_question': engine_result.next_follow_up_question,
         }
 
-    def _build_automotive_fallback_response(self, conversation: Conversation) -> dict[str, Any]:
+    def _build_automotive_fallback_response(
+        self,
+        conversation: Conversation,
+        engine_result: Any,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        component = engine_result.components[0].replace('_', ' ') if engine_result.components else 'vehicle'
+        question = engine_result.next_follow_up_question if context and context.get('_component_follow_up_answered') else (
+            f'When does the {component} problem happen, and what exactly do you notice?'
+            if component != 'vehicle'
+            else 'Which vehicle component or system is affected, and what do you notice?'
+        )
         return {
             'conversation_id': str(conversation.id),
             'status': MatchStatus.NEEDS_INFORMATION.value,
-            'reply': AUTOMOTIVE_FALLBACK_REPLY,
+            'reply': f'{AUTOMOTIVE_FALLBACK_REPLY} {question}',
             'diagnosis': None,
             'possible_diagnoses': [],
             'recommended_service': None,
             'safety_guidance': None,
             'matched_rule': None,
             'matched_rules': [],
-            'missing_information': ['symptom_timing', 'shifting_behavior', 'warning_lights'],
-            'next_follow_up_question': (
-                'When does it happen, does the RPM rise without acceleration, and are any warning lights on?'
-            ),
+            'missing_information': ['symptom_timing', 'symptom_details'],
+            'next_follow_up_question': question,
         }
 
     def _build_gemini_response(

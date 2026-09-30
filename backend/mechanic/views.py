@@ -150,4 +150,9 @@ class UploadAPIView(APIView):
 				http_status=status.HTTP_500_INTERNAL_SERVER_ERROR,
 			)
 
-		return Response(UploadResponseSerializer(result.data).data, status=status.HTTP_201_CREATED)
+		assistant_result = ChatService().process_media_upload(
+			conversation_id=serializer.validated_data['conversation_id'],
+			attachment_id=result.data['attachment']['id'],
+		)
+		response_data = {**result.data, 'assistant_response': assistant_result.data}
+		return Response(UploadResponseSerializer(response_data).data, status=status.HTTP_201_CREATED)
