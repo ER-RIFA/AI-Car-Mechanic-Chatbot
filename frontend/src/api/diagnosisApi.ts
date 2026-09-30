@@ -6,7 +6,7 @@ export async function requestDiagnosis(request: DiagnosisRequest): Promise<Diagn
   let response: Response
 
   try {
-    response = await fetch(`${apiBaseUrl}/api/diagnosis/`, {
+    response = await fetch(`${apiBaseUrl}/diagnosis/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request),

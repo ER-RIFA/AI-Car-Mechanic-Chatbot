@@ -6,7 +6,7 @@ export async function sendChatMessage(request: ChatRequest): Promise<ChatRespons
   let response: Response
 
   try {
-    response = await fetch(`${apiBaseUrl}/api/chat/`, {
+    response = await fetch(`${apiBaseUrl}/chat/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request),

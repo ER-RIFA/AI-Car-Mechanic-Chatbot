@@ -38,7 +38,7 @@ export async function uploadMedia({ conversation_id, file }: UploadRequest): Pro
 
   let response: Response
   try {
-    response = await fetch(`${apiBaseUrl}/api/upload/`, {
+    response = await fetch(`${apiBaseUrl}/upload/`, {
       method: 'POST',
       body: formData,
     })

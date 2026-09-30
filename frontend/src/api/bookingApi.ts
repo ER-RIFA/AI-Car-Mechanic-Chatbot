@@ -14,7 +14,7 @@ async function parseResponse<T>(response: Response, fallback: string): Promise<T
 export async function createBooking(request: BookingRequest): Promise<BookingResponse> {
   let response: Response
   try {
-    response = await fetch(`${apiBaseUrl}/api/booking/`, {
+    response = await fetch(`${apiBaseUrl}/booking/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request),
@@ -28,7 +28,7 @@ export async function createBooking(request: BookingRequest): Promise<BookingRes
 export async function getBooking(bookingId: number): Promise<BookingResponse> {
   let response: Response
   try {
-    response = await fetch(`${apiBaseUrl}/api/booking/${bookingId}/`)
+    response = await fetch(`${apiBaseUrl}/booking/${bookingId}/`)
   } catch {
     throw new Error('The backend is unreachable. Check that the server is running and try again.')
   }
