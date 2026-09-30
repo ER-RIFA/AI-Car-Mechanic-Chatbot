@@ -44,6 +44,40 @@ class ChatAPITests(TestCase):
 		self.assertNotIn('Does the engine crank', response.data['reply'])
 		self.assertIn('Do not drive', response.data['reply'])
 
+	def test_api_component_variations_never_fall_into_generic_clarification(self):
+		cases = (
+			('horn', "horn doesn't work", 'horn', None),
+			('horns', "my car horns don't work", 'horn', None),
+			('headlight', 'headlight is broken', 'lights', None),
+			('headlights', "my headlights don't work", 'lights', None),
+			('tire', 'tire is flat', 'tires', 'tire_pressure'),
+			('tires', 'my tires are flat', 'tires', 'tire_pressure'),
+			('brake', "brake isn't working", 'brakes', 'brake_failure'),
+			('brakes', "brakes aren't working", 'brakes', 'brake_failure'),
+			('wiper', 'wiper is broken', 'wipers', None),
+			('wipers', "wipers stopped working", 'wipers', None),
+			('mirror', 'mirror is broken', 'mirrors', None),
+			('mirrors', 'mirrors are broken', 'mirrors', None),
+		)
+		for label, message, component, rule_id in cases:
+			with self.subTest(label=label, message=message):
+				response = self.post_message(message)
+				self.assertEqual(response.status_code, 201)
+				self.assertNotEqual(
+					response.data['next_follow_up_question'],
+					'Which vehicle component or system is affected?',
+				)
+				self.assertEqual(response.data['matched_rule'], rule_id)
+				if rule_id is None:
+					self.assertIn(component, response.data['next_follow_up_question'].lower())
+
+	def test_api_plural_horn_conversation_keeps_component_specific_follow_up(self):
+		response = self.post_message("my car horns don't work")
+
+		self.assertEqual(response.data['status'], 'needs_information')
+		self.assertNotIn('Which vehicle component or system is affected?', response.data['reply'])
+		self.assertIn('horn', response.data['next_follow_up_question'].lower())
+
 	def test_existing_conversation_continuation_uses_context(self):
 		first_response = self.post_message("My car won't start")
 		conversation_id = first_response.data['conversation_id']

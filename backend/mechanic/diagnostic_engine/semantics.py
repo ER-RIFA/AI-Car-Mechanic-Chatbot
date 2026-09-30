@@ -149,7 +149,7 @@ def _score_component_concepts(text: str, complaints: dict[str, float]) -> dict[s
                 continue
             if component == "brakes" and re.search(r"\bbrake lights?\b", text):
                 continue
-            if re.search(rf"\b{re.escape(normalized_alias)}\b", text):
+            if _vocabulary_alias_present(normalized_alias, text):
                 score = max(score, 1.0 + min(len(normalized_alias.split()), 3) * 0.1)
             elif " " not in normalized_alias and len(normalized_alias) >= 5:
                 if _fuzzy_token_present(normalized_alias, text):
@@ -168,12 +168,41 @@ def _score_component_concepts(text: str, complaints: dict[str, float]) -> dict[s
 
 
 def _fuzzy_token_present(term: str, text: str) -> bool:
+    forms = _vocabulary_forms(term)
     return any(
         len(token) >= 5
-        and not (term.rstrip("s") == token.rstrip("s") and term != token)
-        and SequenceMatcher(None, term, token).ratio() >= 0.82
+        and any(SequenceMatcher(None, form, token).ratio() >= 0.82 for form in forms)
         for token in text.split()
     )
+
+
+def _vocabulary_alias_present(alias: str, text: str) -> bool:
+    pattern = "|".join(
+        rf"\b{re.escape(form)}\b" for form in _vocabulary_forms(alias)
+    )
+    return bool(re.search(pattern, text))
+
+
+def _vocabulary_forms(alias: str) -> tuple[str, ...]:
+    """Return scoped singular/plural forms for a known vocabulary alias."""
+    words = alias.split()
+    if not words:
+        return ()
+    last = words[-1]
+    if len(last) <= 2:
+        return (alias,)
+
+    singular = last
+    if last.endswith("ies") and len(last) > 3:
+        singular = f"{last[:-3]}y"
+    elif last.endswith(("ses", "xes", "zes", "ches", "shes")):
+        singular = last[:-2]
+    elif last.endswith("s") and not last.endswith("ss"):
+        singular = last[:-1]
+
+    plural = f"{singular}ies" if singular.endswith("y") else f"{singular}s"
+    forms = {alias, " ".join((*words[:-1], singular)), " ".join((*words[:-1], plural))}
+    return tuple(sorted(forms, key=lambda item: (len(item.split()), len(item))))
 
 
 def _score_concepts(text: str, concepts: dict[str, tuple[str, ...]]) -> dict[str, float]:
