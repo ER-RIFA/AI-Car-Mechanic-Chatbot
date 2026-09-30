@@ -26,7 +26,7 @@ class DiagnosticRule:
 DIAGNOSTIC_RULES = (
     DiagnosticRule(
         "no_start", "starting problem",
-        {"start": ("start", "starting", "ignite", "turn on", "crank", "cranking"), "vehicle": ("car", "vehicle", "engine"), "no_start": ("not start", "cannot start", "will not start", "start problem", "not crank", "cannot crank", "will not crank", "no crank", "cranks but")},
+        {"start": ("start", "starting", "ignite", "turn on", "crank", "cranking"), "vehicle": ("car", "vehicle", "engine"), "no_start": ("not start", "cannot start", "will not start", "refuses to start", "nothing happens", "start problem", "not crank", "cannot crank", "will not crank", "no crank", "cranks but")},
         ("cranks", "dashboard_lights", "clicking", "battery_history"),
         {"cranks": ("crank", "cranking", "turns over", "engine spins", "no crank"), "dashboard_lights": ("dashboard", "dash lights", "warning lights", "instrument lights"), "clicking": ("click", "clicking", "rapid clicks"), "battery_history": ("weak battery", "dead battery", "slow start", "dim lights", "battery recently")},
         {"cranks": "Does the engine crank or turn over when you try to start it?", "dashboard_lights": "Do the dashboard lights come on?", "clicking": "Do you hear a click or repeated clicking?", "battery_history": "Have you noticed a weak battery, slow starting, or dim lights recently?"},

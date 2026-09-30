@@ -10,6 +10,11 @@ from .rules import DIAGNOSTIC_RULES, DiagnosticRule
 from .semantics import RULE_INTENTS, SemanticEvidence, extract_semantics
 
 
+_NON_AUTOMOTIVE_CONTEXT = {
+    "laptop", "phone", "computer", "washing machine", "refrigerator", "oven", "television",
+}
+
+
 class MatchStatus(str, Enum):
     MATCHED = "matched"
     NEEDS_INFORMATION = "needs_information"
@@ -86,6 +91,8 @@ class DiagnosticEngine:
         )
         matches = tuple(item for item in matches if item.score > 0)
         if not matches:
+            if any(term in normalized_message for term in _NON_AUTOMOTIVE_CONTEXT):
+                return DiagnosticMatchResult(MatchStatus.UNSUPPORTED, None, (), (), (), None, (), None, None, None)
             if evidence.components or evidence.complaints:
                 component = evidence.interpretation.component
                 missing = ("complaint",) if component else ("component",)
@@ -140,8 +147,10 @@ class DiagnosticEngine:
             return None
         if isinstance(key, str):
             profile = RULE_INTENTS.get(rule.rule_id)
-            new_component = extract_semantics(message).interpretation.component
-            if profile and new_component and new_component not in (*profile.components, *profile.related_components):
+            new_components = set(extract_semantics(message).components)
+            if profile and new_components and not new_components.intersection(
+                (*profile.components, *profile.related_components)
+            ):
                 context.pop("pending_follow_up", None)
                 context.pop("matched_rule", None)
                 context["_domain_reclassified"] = True
@@ -185,13 +194,13 @@ class DiagnosticEngine:
             and context["pending_follow_up"].get("rule_id") == rule.rule_id
         )
         if profile:
-            primary_component = evidence.interpretation.component
-            allowed_components = (*profile.components, *profile.related_components)
-            if primary_component and primary_component not in allowed_components and not pending_current_rule:
-                return RuleMatch(rule, 0, ())
             if not pending_current_rule and not all(item in evidence.components for item in profile.required_components):
                 return RuleMatch(rule, 0, ())
             if not pending_current_rule and not all(item in evidence.complaints for item in profile.required_complaints):
+                return RuleMatch(rule, 0, ())
+            if not pending_current_rule and profile.complaint_options and not any(
+                item in evidence.complaints for item in profile.complaint_options
+            ):
                 return RuleMatch(rule, 0, ())
         matched_groups = tuple(
             group for group, aliases in rule.keyword_groups.items()
@@ -205,6 +214,7 @@ class DiagnosticEngine:
         if profile:
             score += 2 * sum(item in evidence.components for item in profile.components)
             score += 3 * sum(item in evidence.complaints for item in profile.complaints)
+            score += sum(evidence.components.get(item, 0) for item in profile.components)
             if rule.rule_id == "no_start" and "no_start" in evidence.complaints:
                 score += 4
         if len(matched_groups) >= 2:

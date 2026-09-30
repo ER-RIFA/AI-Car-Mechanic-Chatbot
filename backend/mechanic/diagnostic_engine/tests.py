@@ -197,6 +197,66 @@ class DiagnosticEngineTests(unittest.TestCase):
         self.assertEqual(result.matched_rule.rule_id, "engine_overheat")
         self.assertIn("Stop safely", result.safety_guidance)
 
+    def test_starting_variations_share_no_start_semantics(self):
+        for message in (
+            "the car does not start",
+            "it won't crank",
+            "nothing happens when I turn the key",
+            "the engine turns over but doesn't start",
+            "my vehicle refuses to start",
+        ):
+            with self.subTest(message=message):
+                result = self.engine.match(message)
+                self.assertEqual(result.matched_rule.rule_id, "no_start")
+                self.assertIn("no_start", result.complaints)
+
+    def test_component_context_distinguishes_lights_brakes_and_wheels(self):
+        cases = (
+            ("headlights aren't working", "lights"),
+            ("my brake light is broken", "lights"),
+            ("my wheel is damaged", "tires"),
+            ("the wheel shakes while braking", "tires"),
+            ("the steering wheel shakes", "steering"),
+        )
+        for message, component in cases:
+            with self.subTest(message=message):
+                result = self.engine.match(message)
+                self.assertIn(component, result.components)
+                if component == "lights":
+                    self.assertNotIn("brakes", result.components)
+
+    def test_negated_observations_do_not_become_failures(self):
+        result = self.engine.match("the battery is not dead")
+        self.assertIn("battery", result.components)
+        self.assertNotIn("failure", result.complaints)
+
+        starting = self.engine.match("the engine will not start")
+        self.assertIn("no_start", starting.complaints)
+
+    def test_generic_and_non_automotive_complaints_have_different_routes(self):
+        for message in ("my car is broken", "something is wrong", "it stopped working"):
+            with self.subTest(message=message):
+                result = self.engine.match(message)
+                self.assertEqual(result.status, MatchStatus.NEEDS_INFORMATION)
+                self.assertEqual(result.missing_information, ("component",))
+
+        for message in ("my laptop is broken", "my computer is overheating", "my washing machine isn't working"):
+            with self.subTest(message=message):
+                self.assertEqual(self.engine.match(message).status, MatchStatus.UNSUPPORTED)
+
+    def test_unknown_automotive_components_are_clarified_without_inventing_rules(self):
+        for message, component in (("my horn stopped working", "horn"), ("my wipers are broken", "wipers")):
+            with self.subTest(message=message):
+                result = self.engine.match(message)
+                self.assertEqual(result.status, MatchStatus.NEEDS_INFORMATION)
+                self.assertIsNone(result.matched_rule)
+                self.assertIn(component, result.components)
+
+    def test_multi_component_message_preserves_safety_critical_brakes(self):
+        result = self.engine.match("the car starts but the brakes don't work and the steering pulls")
+        self.assertEqual(result.matched_rule.rule_id, "brake_failure")
+        self.assertIn("Do not drive", result.safety_guidance)
+
 
 if __name__ == "__main__":
     unittest.main()
