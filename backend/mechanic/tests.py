@@ -78,6 +78,43 @@ class ChatAPITests(TestCase):
 		self.assertNotIn('Which vehicle component or system is affected?', response.data['reply'])
 		self.assertIn('horn', response.data['next_follow_up_question'].lower())
 
+	def test_api_component_follow_up_is_consumed_and_does_not_repeat(self):
+		first = self.post_message("my car horns don't work")
+		conversation_id = first.data['conversation_id']
+		answer = 'when i press the horn, sound does not come'
+
+		second = self.post_message(answer, conversation_id)
+		conversation = Conversation.objects.get(pk=conversation_id)
+		context = ChatService()._build_context(conversation)
+
+		self.assertEqual(second.status_code, 200)
+		self.assertNotEqual(second.data['reply'], first.data['reply'])
+		self.assertNotEqual(
+			second.data['next_follow_up_question'],
+			first.data['next_follow_up_question'],
+		)
+		self.assertEqual(context['follow_up_answers']['component_details'], answer)
+		self.assertNotIn('pending_follow_up', context)
+		self.assertEqual(
+			conversation.messages.filter(role=Message.Role.USER).count(),
+			2,
+		)
+		self.assertEqual(
+			list(conversation.messages.filter(role=Message.Role.USER).values_list('content', flat=True)).count(answer),
+			1,
+		)
+
+	def test_api_component_follow_up_accepts_lighting_detail(self):
+		first = self.post_message("my headlights don't work")
+		second = self.post_message('only the left one', first.data['conversation_id'])
+
+		self.assertEqual(second.status_code, 200)
+		self.assertNotEqual(second.data['next_follow_up_question'], first.data['next_follow_up_question'])
+		context = ChatService()._build_context(
+			Conversation.objects.get(pk=first.data['conversation_id'])
+		)
+		self.assertEqual(context['follow_up_answers']['component_details'], 'only the left one')
+
 	def test_existing_conversation_continuation_uses_context(self):
 		first_response = self.post_message("My car won't start")
 		conversation_id = first_response.data['conversation_id']
