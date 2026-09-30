@@ -2,11 +2,12 @@
 
 from dataclasses import dataclass
 from enum import Enum
-import re
 from typing import Any
 
 from .normalizer import normalize_text, text_from_context
+from .follow_up import FollowUpInterpreter
 from .rules import DIAGNOSTIC_RULES, DiagnosticRule
+from .semantics import RULE_INTENTS, SemanticEvidence, extract_semantics
 
 
 class MatchStatus(str, Enum):
@@ -35,6 +36,8 @@ class DiagnosticMatchResult:
     recommended_service: str | None
     safety_guidance: str | None
     match_score: int | None
+    components: tuple[str, ...] = ()
+    complaints: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         """Return an API-neutral representation suitable for a later service layer."""
@@ -52,6 +55,8 @@ class DiagnosticMatchResult:
             "recommended_service": self.recommended_service,
             "safety_guidance": self.safety_guidance,
             "match_score": self.match_score,
+            "components": self.components,
+            "complaints": self.complaints,
         }
 
 
@@ -60,21 +65,40 @@ class DiagnosticEngine:
 
     def __init__(self, rules: tuple[DiagnosticRule, ...] = DIAGNOSTIC_RULES) -> None:
         self.rules = rules
+        self.follow_up_interpreter = FollowUpInterpreter()
 
     def match(self, message: str, context: dict[str, Any] | None = None) -> DiagnosticMatchResult:
-        context = dict(context or {})
+        context = context if isinstance(context, dict) else {}
         context.setdefault("follow_up_answers", {})
         normalized_message = normalize_text(message)
-        self.update_follow_up_context(normalized_message, context)
-        normalized_context = text_from_context(context)
-        combined_text = normalize_text(f"{normalized_message} {normalized_context}")
+        pending_answer = self.update_follow_up_context(message, context)
+        domain_reclassified = context.pop("_domain_reclassified", False)
+        normalized_context = "" if domain_reclassified else text_from_context(context)
+        answer_was_pending = pending_answer is True
+        combined_text = normalize_text(
+            f"{'' if answer_was_pending else normalized_message} {normalized_context}"
+        )
+        evidence = extract_semantics(combined_text)
         matches = sorted(
-            (self._score_rule(rule, combined_text, context) for rule in self.rules),
+            (self._score_rule(rule, combined_text, context, evidence) for rule in self.rules),
             key=lambda item: item.score,
             reverse=True,
         )
         matches = tuple(item for item in matches if item.score > 0)
         if not matches:
+            if evidence.components or evidence.complaints:
+                component = evidence.interpretation.component
+                missing = ("complaint",) if component else ("component",)
+                question = (
+                    f"What is happening with the {component.replace('_', ' ')} system?"
+                    if component
+                    else "Which vehicle component or system is affected?"
+                )
+                return DiagnosticMatchResult(
+                    MatchStatus.NEEDS_INFORMATION, None, (), (), missing,
+                    question, (), None, None, None,
+                    tuple(evidence.components), tuple(evidence.complaints),
+                )
             return DiagnosticMatchResult(MatchStatus.UNSUPPORTED, None, (), (), (), None, (), None, None, None)
 
         primary = matches[0]
@@ -82,6 +106,7 @@ class DiagnosticEngine:
             return DiagnosticMatchResult(
                 MatchStatus.AMBIGUOUS, primary.rule, matches[:3], primary.matched_groups, (), None,
                 primary.rule.possible_diagnoses, primary.rule.recommended_service, primary.rule.safety_guidance, primary.score,
+                tuple(evidence.components), tuple(evidence.complaints),
             )
 
         missing = tuple(
@@ -89,78 +114,99 @@ class DiagnosticEngine:
             if not self._has_information(primary.rule, key, combined_text, context)
         )
         status = MatchStatus.NEEDS_INFORMATION if missing else MatchStatus.MATCHED
+        next_question = primary.rule.follow_up_questions[missing[0]] if missing else None
+        if answer_was_pending and missing:
+            next_question = f"I couldn't determine that answer. Could you clarify: {next_question}"
         return DiagnosticMatchResult(
             status, primary.rule, matches[:3], primary.matched_groups, missing,
-            primary.rule.follow_up_questions[missing[0]] if missing else None,
+            next_question,
             primary.rule.possible_diagnoses, primary.rule.recommended_service,
             primary.rule.safety_guidance, primary.score,
+            tuple(evidence.components), tuple(evidence.complaints),
         )
 
-    def update_follow_up_context(self, message: str, context: dict[str, Any]) -> None:
-        """Record the current message against the rule and pending field in context."""
+    def update_follow_up_context(self, message: str, context: dict[str, Any]) -> bool | None:
+        """Interpret a pending answer before considering standalone symptoms."""
         normalized_message = normalize_text(message)
         pending = context.get("pending_follow_up")
         rule_id = pending.get("rule_id") if isinstance(pending, dict) else context.get("matched_rule")
         key = pending.get("key") if isinstance(pending, dict) else None
         rule = next((item for item in self.rules if item.rule_id == rule_id), None)
         if rule is None:
-            return
+            return None
 
         answers = context.setdefault("follow_up_answers", {})
         if not isinstance(answers, dict):
-            return
+            return None
         if isinstance(key, str):
-            signals = rule.follow_up_answer_signals.get(key, ())
-            signals = (*signals, *rule.information_signals.get(key, ()))
-            answer = self._pending_answer(normalized_message, rule, key)
-            if answer or any(signal in normalized_message for signal in signals):
-                answers[key] = answer or message
+            profile = RULE_INTENTS.get(rule.rule_id)
+            new_component = extract_semantics(message).interpretation.component
+            if profile and new_component and new_component not in (*profile.components, *profile.related_components):
+                context.pop("pending_follow_up", None)
+                context.pop("matched_rule", None)
+                context["_domain_reclassified"] = True
+                return False
+            interpretation = self.follow_up_interpreter.interpret(message, rule, key)
+            if isinstance(pending, dict):
+                if interpretation.answered:
+                    self._accumulate_answer(context, key, interpretation.value or message)
+                    context.setdefault("follow_up_facts", {}).update(interpretation.facts)
+                return True
 
         for field, signals in rule.information_signals.items():
             if field not in answers:
                 signal = next((signal for signal in signals if signal in normalized_message), None)
                 if signal:
                     answers[field] = signal
+        return False
 
-    def _pending_answer(self, message: str, rule: DiagnosticRule, key: str) -> str | None:
-        if key not in rule.yes_no_follow_up_keys:
-            return None
-        if message in {"yes", "yes it does"}:
-            return "affirmative"
-        if message in {"no", "no it does not"}:
-            return "negative"
-        question_terms = self._question_terms(rule.follow_up_questions[key])
-        message_terms = message.split()
-        if message_terms and message_terms[0] in {"yes", "no"}:
-            if self._has_question_term(message_terms[1:], question_terms):
-                return message
-        for index, term in enumerate(message_terms[:-1]):
-            if term == "not" and self._has_question_term(message_terms[index + 1:], question_terms):
-                return message
-        return None
+    def _accumulate_answer(self, context: dict[str, Any], key: str, value: str) -> None:
+        answers = context.setdefault("follow_up_answers", {})
+        previous = answers.get(key)
+        if previous is None or previous == value:
+            answers[key] = value
+            return
+        history = context.setdefault("follow_up_answer_history", {}).setdefault(key, [])
+        if not history:
+            history.append(previous)
+        history.append(value)
+        answers[key] = list(history)
 
-    def _question_terms(self, question: str) -> set[str]:
-        return {
-            self._stem(term)
-            for term in normalize_text(question).split()
-            if len(term) > 2
-        }
-
-    def _has_question_term(self, terms: list[str], question_terms: set[str]) -> bool:
-        return any(self._stem(term) in question_terms for term in terms)
-
-    def _stem(self, term: str) -> str:
-        for suffix in ("ing", "ed", "es", "s"):
-            if term.endswith(suffix) and len(term) - len(suffix) >= 3:
-                return term[:-len(suffix)]
-        return term
-
-    def _score_rule(self, rule: DiagnosticRule, text: str, context: dict[str, Any]) -> RuleMatch:
+    def _score_rule(
+        self,
+        rule: DiagnosticRule,
+        text: str,
+        context: dict[str, Any],
+        evidence: SemanticEvidence,
+    ) -> RuleMatch:
+        profile = RULE_INTENTS.get(rule.rule_id)
+        pending_current_rule = (
+            isinstance(context.get("pending_follow_up"), dict)
+            and context["pending_follow_up"].get("rule_id") == rule.rule_id
+        )
+        if profile:
+            primary_component = evidence.interpretation.component
+            allowed_components = (*profile.components, *profile.related_components)
+            if primary_component and primary_component not in allowed_components and not pending_current_rule:
+                return RuleMatch(rule, 0, ())
+            if not pending_current_rule and not all(item in evidence.components for item in profile.required_components):
+                return RuleMatch(rule, 0, ())
+            if not pending_current_rule and not all(item in evidence.complaints for item in profile.required_complaints):
+                return RuleMatch(rule, 0, ())
         matched_groups = tuple(
             group for group, aliases in rule.keyword_groups.items()
             if any(alias in text for alias in aliases)
         )
+        if rule.required_keyword_groups and not pending_current_rule and not all(
+            group in matched_groups for group in rule.required_keyword_groups
+        ):
+            return RuleMatch(rule, 0, matched_groups)
         score = 2 * len(matched_groups)
+        if profile:
+            score += 2 * sum(item in evidence.components for item in profile.components)
+            score += 3 * sum(item in evidence.complaints for item in profile.complaints)
+            if rule.rule_id == "no_start" and "no_start" in evidence.complaints:
+                score += 4
         if len(matched_groups) >= 2:
             score += len(matched_groups) - 1
         if self._context_mentions_rule(context, rule.rule_id):

@@ -19,18 +19,30 @@ class DiagnosticRule:
     safety_guidance: str
     follow_up_answer_signals: dict[str, tuple[str, ...]] = field(default_factory=dict)
     yes_no_follow_up_keys: tuple[str, ...] = ()
+    follow_up_semantics: dict[str, dict[str, tuple[str, ...]]] = field(default_factory=dict)
+    required_keyword_groups: tuple[str, ...] = ()
 
 
 DIAGNOSTIC_RULES = (
     DiagnosticRule(
         "no_start", "starting problem",
-        {"start": ("start", "starting", "ignite", "turn on"), "vehicle": ("car", "vehicle", "engine"), "no_start": ("not start", "cannot start", "will not start", "start problem")},
+        {"start": ("start", "starting", "ignite", "turn on", "crank", "cranking"), "vehicle": ("car", "vehicle", "engine"), "no_start": ("not start", "cannot start", "will not start", "start problem", "not crank", "cannot crank", "will not crank", "no crank", "cranks but")},
         ("cranks", "dashboard_lights", "clicking", "battery_history"),
         {"cranks": ("crank", "cranking", "turns over", "engine spins", "no crank"), "dashboard_lights": ("dashboard", "dash lights", "warning lights", "instrument lights"), "clicking": ("click", "clicking", "rapid clicks"), "battery_history": ("weak battery", "dead battery", "slow start", "dim lights", "battery recently")},
         {"cranks": "Does the engine crank or turn over when you try to start it?", "dashboard_lights": "Do the dashboard lights come on?", "clicking": "Do you hear a click or repeated clicking?", "battery_history": "Have you noticed a weak battery, slow starting, or dim lights recently?"},
         ("Weak or discharged battery", "Starter motor or electrical connection issue", "Fuel or ignition system fault"),
         "Battery and starting-system inspection",
         "If the vehicle is in an unsafe location, move to safety and arrange roadside assistance rather than repeatedly trying to start it.",
+        follow_up_semantics={
+            "cranks": {
+                "affirmative": ("crank", "cranking", "turn over", "turns over", "spins"),
+                "negative": ("no crank", "does not crank", "just clicks", "nothing happens", "silent"),
+            },
+            "dashboard_lights": {"affirmative": ("come on", "on", "bright"), "negative": ("off", "out", "dim", "nothing")},
+            "clicking": {"affirmative": ("click", "clicking", "one click", "rapid clicks"), "negative": ("silent", "no sound", "nothing")},
+            "battery_history": {"affirmative": ("weak", "dead", "slow", "dim", "recently"), "negative": ("healthy", "normal", "no issue")},
+        },
+        required_keyword_groups=("no_start",),
     ),
     DiagnosticRule(
         "starting_click", "clicking noise when starting",
@@ -41,6 +53,13 @@ DIAGNOSTIC_RULES = (
         ("Low battery charge", "Loose or corroded battery connection", "Starter motor fault"),
         "Battery, connections, and starter inspection",
         "Avoid repeated starting attempts if cables or wiring become hot, and arrange assistance if the vehicle is stranded.",
+        follow_up_semantics={
+            "click_pattern": {
+                "single": ("one", "single", "solid", "just a click"),
+                "rapid": ("rapid", "repeated", "many", "clicking repeatedly"),
+            },
+            "dashboard_lights": {"affirmative": ("stay on", "on", "bright"), "negative": ("dim", "go out", "off", "nothing")},
+        },
     ),
     DiagnosticRule(
         "engine_overheat", "engine overheating",
@@ -51,6 +70,34 @@ DIAGNOSTIC_RULES = (
         ("Low coolant or coolant leak", "Thermostat or radiator problem", "Cooling fan or water pump fault"),
         "Cooling-system inspection and pressure test",
         "Stop safely, switch off the engine, and do not continue driving while severely overheated. Do not open a hot radiator cap.",
+        follow_up_semantics={
+            "temperature": {"high": ("high", "hot", "red", "overheat", "near the red"), "normal": ("normal", "fine", "not hot")},
+            "coolant_or_leak": {"affirmative": ("leak", "leaking", "low", "empty", "coolant loss"), "negative": ("full", "normal level", "no leak")},
+            "warning_signs": {"affirmative": ("steam", "smoke", "hot smell", "warning"), "negative": ("none", "no steam", "no smoke")},
+        },
+    ),
+    DiagnosticRule(
+        "engine_noise", "engine noise",
+        {"engine": ("engine", "motor"), "noise": ("noise", "sound", "knock", "rattle", "hiss")},
+        ("noise_description",),
+        {"noise_description": ("noise", "sound", "knock", "rattle", "hiss")},
+        {"noise_description": "What does the engine noise sound like, and when does it occur?"},
+        ("Engine noise requiring inspection", "Possible belt, accessory, or internal engine issue"),
+        "Engine and accessory inspection",
+        "If the engine noise is severe, accompanied by smoke, warning lights, or loss of power, stop safely and arrange professional inspection.",
+    ),
+    DiagnosticRule(
+        "brake_failure", "brake failure",
+        {
+            "brakes": ("brake", "brakes", "stopping", "stop", "pedal"),
+            "failure": ("does not work", "do not work", "not working", "stopped working", "cannot brake", "will not stop", "no brakes", "useless"),
+        },
+        (),
+        {},
+        {},
+        ("Brake system problem requiring immediate inspection",),
+        "Brake-system inspection and roadside assistance",
+        "Do not drive a vehicle if the brakes are not functioning. Stop safely and arrange roadside assistance or professional inspection.",
     ),
     DiagnosticRule(
         "brake_noise", "brake squealing or grinding",
@@ -61,15 +108,19 @@ DIAGNOSTIC_RULES = (
         ("Worn brake pads or wear indicator", "Brake rotor damage", "Debris or sticking brake component"),
         "Brake inspection, including pads, rotors, and calipers",
         "If grinding is severe, the pedal is soft, or braking performance is reduced, do not drive; arrange professional assistance.",
-        {"braking_effect": (
-            "brakes is a bit hard", "brakes feel hard", "brakes feel harder", "brakes feels harder",
-            "brakes performance has changed", "brakes feels different",
-            "breaking is a bit hard", "breaking feels hard", "breaking feels harder",
-            "pedal feels hard", "pedal is hard", "pedal is harder", "pedal feels harder",
-            "pedal feels soft", "brakes feels normal", "brakes feel normal",
-            "brakes is normal", "braking feels normal",
-        )},
-        ("noise_type", "braking_effect", "recent_brake_work"),
+        follow_up_semantics={
+            "noise_type": {
+                "light": ("squeal", "squeak", "small", "tiny", "light"),
+                "harsh": ("grind", "grinding", "scrape", "scraping", "metal", "harsh"),
+            },
+            "braking_effect": {
+                "changed": ("changed", "different", "harder", "hard", "soft", "sinks", "longer", "takes longer", "reduced"),
+                "normal": ("normal", "fine", "unchanged", "same", "no change"),
+                "affirmative": (),
+                "negative": (),
+            },
+            "recent_brake_work": {"affirmative": (), "negative": ()},
+        },
     ),
     DiagnosticRule(
         "check_engine_light", "check-engine light",
@@ -100,6 +151,11 @@ DIAGNOSTIC_RULES = (
         ("Puncture or leaking valve", "Low tire pressure", "Tire damage requiring replacement"),
         "Tire inspection, repair, or replacement",
         "Do not drive on a flat or visibly damaged tire, especially with sidewall damage; use a spare or roadside assistance.",
+        follow_up_semantics={
+            "affected_tire": {"front": ("front",), "rear": ("rear",), "left": ("left", "driver"), "right": ("right", "passenger")},
+            "visible_damage": {"affirmative": ("nail", "screw", "cut", "bulge", "damage", "puncture"), "negative": ("none", "nothing", "looks fine")},
+            "pressure_reading": {"low": ("low", "underinflated", "tire light"), "normal": ("normal", "correct", "fine"), "provided": ("psi", "pressure")},
+        },
     ),
     DiagnosticRule(
         "battery_warning", "battery warning or dim lights",
@@ -110,6 +166,11 @@ DIAGNOSTIC_RULES = (
         ("Alternator or charging-system fault", "Weak battery", "Loose belt or electrical connection"),
         "Battery and charging-system test",
         "A charging warning with dimming lights can precede a stall; avoid unnecessary driving and arrange assistance if symptoms worsen.",
+        follow_up_semantics={
+            "warning_behavior": {"on": ("on", "lit", "steady", "flashing"), "off": ("off", "out", "not on")},
+            "starting_behavior": {"slow": ("slow", "hard", "intermittent", "clicking"), "normal": ("normal", "normally", "fine")},
+            "electrical_symptoms": {"changed": ("dim", "flicker", "reset", "cut out"), "normal": ("normal", "fine", "no issue")},
+        },
     ),
     DiagnosticRule(
         "oil_leak", "oil leak",
@@ -120,6 +181,16 @@ DIAGNOSTIC_RULES = (
         ("Engine oil leak", "Filter, drain plug, or seal leak", "Possible fuel or fluid leak"),
         "Fluid-leak inspection and level check",
         "Do not drive with a major leak or low oil level. If fuel is suspected, avoid ignition sources and arrange immediate professional inspection.",
+    ),
+    DiagnosticRule(
+        "steering_failure", "steering failure",
+        {"steering": ("steering", "steering wheel"), "failure": ("broken", "does not work", "not working", "stopped working", "useless")},
+        (),
+        {},
+        {},
+        ("Steering-system problem requiring inspection",),
+        "Steering and suspension inspection",
+        "If steering control is impaired, do not continue driving; stop safely and arrange professional inspection or roadside assistance.",
     ),
     DiagnosticRule(
         "steering_vibration", "steering vibration",

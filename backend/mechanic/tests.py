@@ -36,6 +36,14 @@ class ChatAPITests(TestCase):
 		conversation = Conversation.objects.get(pk=response.data['conversation_id'])
 		self.assertEqual(conversation.messages.count(), 2)
 
+	def test_brake_failure_initial_message_uses_brake_safety_flow(self):
+		response = self.post_message("my car breaks don't work")
+
+		self.assertEqual(response.data['status'], 'matched')
+		self.assertEqual(response.data['matched_rule'], 'brake_failure')
+		self.assertNotIn('Does the engine crank', response.data['reply'])
+		self.assertIn('Do not drive', response.data['reply'])
+
 	def test_existing_conversation_continuation_uses_context(self):
 		first_response = self.post_message("My car won't start")
 		conversation_id = first_response.data['conversation_id']
@@ -91,10 +99,7 @@ class ChatAPITests(TestCase):
 		conversation_id = first_response.data['conversation_id']
 
 		second_response = self.post_message('steering wheel shaking', conversation_id)
-		self.assertEqual(
-			second_response.data['next_follow_up_question'],
-			'Has braking performance changed or does the pedal feel soft?',
-		)
+		self.assertEqual(second_response.data['matched_rule'], 'steering_vibration')
 
 		third_response = self.post_message('no', conversation_id)
 		self.assertNotEqual(
@@ -103,12 +108,10 @@ class ChatAPITests(TestCase):
 		)
 
 	def test_brake_follow_up_fields_never_repeat_across_multiple_answers(self):
-		first_response = self.post_message(
-			'My brakes squeal and the steering wheel shakes when braking'
-		)
+		first_response = self.post_message('My brakes squeal')
 		conversation_id = first_response.data['conversation_id']
 		responses = [
-			self.post_message('steering wheel shaking', conversation_id),
+			self.post_message('no', conversation_id),
 			self.post_message('no', conversation_id),
 			self.post_message('no', conversation_id),
 		]
@@ -137,10 +140,9 @@ class ChatAPITests(TestCase):
 
 	def test_api_follow_up_state_persists_and_advances_semantic_fields(self):
 		first_response = self.post_message(
-			'My brakes squeal and the steering wheel shakes when braking'
+			'My brakes squeal'
 		)
 		conversation_id = first_response.data['conversation_id']
-		self.post_message('steering wheel shaking', conversation_id)
 		conversation = Conversation.objects.get(pk=conversation_id)
 		service = ChatService()
 
@@ -162,7 +164,6 @@ class ChatAPITests(TestCase):
 			with self.subTest(answer=answer):
 				first_response = self.post_message('My brakes squeal')
 				conversation_id = first_response.data['conversation_id']
-				self.post_message('steering wheel shaking', conversation_id)
 				response = self.post_message(answer, conversation_id)
 
 				self.assertNotEqual(
@@ -265,25 +266,30 @@ class MediaUploadAPITests(TestCase):
 		self.assertEqual(response.status_code, 201)
 		self.assertEqual(response.data['attachment']['file_type'], 'image')
 		self.assertTrue(response.data['attachment']['url'].startswith('/media/'))
-		message = self.conversation.messages.get()
+		message = self.conversation.messages.get(message_type=Message.MessageType.IMAGE)
 		attachment = self.conversation.media_attachments.get()
 		self.assertEqual(message.message_type, Message.MessageType.IMAGE)
 		self.assertEqual(attachment.message_id, message.id)
 		self.assertTrue(default_storage.exists(attachment.file.name))
+		self.assertEqual(response.data['assistant_response']['status'], 'needs_information')
+		self.assertEqual(self.conversation.messages.filter(role=Message.Role.USER).count(), 1)
+		self.assertEqual(self.conversation.messages.filter(role=Message.Role.ASSISTANT).count(), 1)
 
 	def test_valid_audio_upload(self):
 		response = self.upload('engine.mp3', b'ID3\x04\x00audio', 'audio/mpeg')
 
 		self.assertEqual(response.status_code, 201)
 		self.assertEqual(response.data['attachment']['file_type'], 'audio')
-		self.assertEqual(self.conversation.messages.get().message_type, Message.MessageType.AUDIO)
+		self.assertEqual(self.conversation.messages.get(message_type=Message.MessageType.AUDIO).message_type, Message.MessageType.AUDIO)
+		self.assertIn('describe', response.data['assistant_response']['reply'].lower())
 
 	def test_valid_video_upload(self):
 		response = self.upload('walkaround.mp4', b'\x00\x00\x00\x18ftypisom', 'video/mp4')
 
 		self.assertEqual(response.status_code, 201)
 		self.assertEqual(response.data['attachment']['file_type'], 'video')
-		self.assertEqual(self.conversation.messages.get().message_type, Message.MessageType.VIDEO)
+		self.assertEqual(self.conversation.messages.get(message_type=Message.MessageType.VIDEO).message_type, Message.MessageType.VIDEO)
+		self.assertIn('describe', response.data['assistant_response']['reply'].lower())
 
 	def test_missing_file(self):
 		response = self.client.post(
@@ -320,11 +326,54 @@ class MediaUploadAPITests(TestCase):
 		response = self.upload('inspection.png', content, 'image/png')
 
 		self.assertEqual(response.data['conversation_id'], str(self.conversation.id))
-		self.assertEqual(response.data['message_id'], self.conversation.messages.get().id)
+		self.assertEqual(response.data['message_id'], self.conversation.messages.get(message_type=Message.MessageType.IMAGE).id)
 		self.assertEqual(response.data['attachment']['file_size'], len(content))
 		self.assertTrue(response.data['attachment']['filename'].endswith('.png'))
 		self.assertEqual(MediaAttachment.objects.count(), 1)
-		self.assertEqual(Message.objects.count(), 1)
+		self.assertEqual(Message.objects.filter(role=Message.Role.USER).count(), 1)
+		self.assertEqual(Message.objects.filter(role=Message.Role.ASSISTANT).count(), 1)
+
+	def test_image_upload_preserves_conversation_and_returns_assistant_response(self):
+		response = self.upload('inspection.png', b'\x89PNG\r\n\x1a\nimage-data', 'image/png')
+
+		self.assertEqual(response.data['conversation_id'], str(self.conversation.id))
+		self.assertEqual(response.data['assistant_response']['conversation_id'], str(self.conversation.id))
+		self.assertEqual(Conversation.objects.count(), 1)
+		self.assertEqual(self.conversation.messages.count(), 2)
+		self.assertTrue(self.conversation.messages.filter(role=Message.Role.ASSISTANT).exists())
+
+	@patch('mechanic.services.chat_service.GeminiService')
+	def test_automotive_image_upload_uses_gemini_and_persists_response(self, gemini_class):
+		self.conversation.messages.create(
+			role=Message.Role.USER,
+			content='My brakes squeal',
+		)
+		gemini = gemini_class.return_value
+		gemini.should_handle_unsupported.return_value = True
+		gemini.analyze_image.return_value = GeminiDiagnosticResult(
+			'matched',
+			'The image suggests brake pad wear.',
+			('Worn brake pads',),
+			'Brake inspection',
+			'Avoid driving if braking is reduced.',
+			None,
+		)
+
+		response = self.upload('inspection.png', b'\x89PNG\r\n\x1a\nimage-data', 'image/png')
+
+		self.assertEqual(response.data['assistant_response']['status'], 'matched')
+		self.assertEqual(self.conversation.diagnoses.get().source, Diagnosis.Source.GEMINI)
+		gemini.analyze_image.assert_called_once()
+		self.assertEqual(self.conversation.messages.filter(role=Message.Role.USER).count(), 2)
+		self.assertEqual(self.conversation.messages.filter(role=Message.Role.ASSISTANT).count(), 1)
+
+	def test_image_upload_without_gemini_returns_clarification(self):
+		with self.settings(GEMINI_API_KEY=''):
+			response = self.upload('inspection.png', b'\x89PNG\r\n\x1a\nimage-data', 'image/png')
+
+		self.assertEqual(response.data['assistant_response']['status'], 'needs_information')
+		self.assertIn('describe', response.data['assistant_response']['reply'].lower())
+		self.assertFalse(self.conversation.diagnoses.exists())
 
 
 class GeminiFallbackTests(TestCase):
